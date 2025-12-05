@@ -1,0 +1,401 @@
+{{- range .Values.additionalDatabases }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $.Values.clusterName }}-create-db-{{ .name }}
+  labels:
+    {{- include "citus-cluster.labels" $ | nindent 4 }}
+    job-type: database-creation
+    database: {{ .name }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "10"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  backoffLimit: {{ default 3 .backoffLimit }}
+  template:
+    metadata:
+      labels:
+        {{- include "citus-cluster.labels" $ | nindent 8 }}
+        job-type: database-creation
+        database: {{ .name }}
+    spec:
+      serviceAccountName: {{ include "citus-cluster.serviceAccountName" $ }}
+      restartPolicy: OnFailure
+      {{- if or (and $.Values.initContainer.enabled $.Values.ssl.enabled) $.Values.pgpass.enabled }}
+      initContainers:
+      - name: fix-permissions
+        image: busybox:latest
+        command:
+        - sh
+        - -c
+        - |
+        {{- if $.Values.ssl.enabled }}
+          # Copy SSL certs and fix permissions
+          cp /tmp/ssl-source/* /etc/ssl/certs/postgresql/
+          chown -R {{ $.Values.initContainer.userId }}:{{ $.Values.initContainer.groupId }} /etc/ssl/certs/postgresql
+          chmod 0600 /etc/ssl/certs/postgresql/*.key
+          chmod 0644 /etc/ssl/certs/postgresql/*.crt
+        {{- end }}
+        {{- if $.Values.pgpass.enabled }}
+          # Setup .pgpass file with password substitution
+          mkdir -p /pgpass-config
+          sed "s/\${POSTGRES_PASSWORD}/${POSTGRES_PASSWORD}/g" /tmp/pgpass-template/pgpass > /pgpass-config/.pgpass
+          chown {{ $.Values.initContainer.userId }}:{{ $.Values.initContainer.groupId }} /pgpass-config/.pgpass
+          chmod 0600 /pgpass-config/.pgpass
+        {{- end }}
+        volumeMounts:
+        {{- if $.Values.ssl.enabled }}
+        - mountPath: /etc/ssl/certs/postgresql
+          name: ssl-certs-writable
+        - mountPath: /tmp/ssl-source
+          name: ssl-certs
+          readOnly: true
+        {{- end }}
+        {{- if $.Values.pgpass.enabled }}
+        - name: pgpass-template
+          mountPath: /tmp/pgpass-template
+          readOnly: true
+        - name: pgpass-config
+          mountPath: /pgpass-config
+        {{- end }}
+        env:
+        {{- if $.Values.pgpass.enabled }}
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ $.Values.secret.name }}
+              key: {{ $.Values.secret.keys.superuserPassword }}
+        {{- end }}
+        securityContext:
+          runAsUser: 0  # Run as root to change ownership
+      {{- end }}
+      containers:
+      - name: create-database
+        image: "{{ $.Values.image.repository }}:{{ $.Values.image.tag }}"
+        imagePullPolicy: {{ $.Values.image.pullPolicy }}
+        command:
+        - /bin/bash
+        - -c
+        - |
+          set -e
+
+          echo "========================================"
+          echo "Creating database: {{ .name }}"
+          echo "========================================"
+
+          export PGPASSWORD="${POSTGRES_PASSWORD}"
+          export COORDINATOR_SERVICE="{{ $.Values.clusterName }}-{{ $.Values.coordinator.citusGroup }}"
+          export PGHOST=${COORDINATOR_SERVICE}
+          export PGPORT={{ $.Values.ports.postgresql }}
+          export PGUSER={{ $.Values.patroni.superuser.username }}
+          export PGDATABASE=postgres
+
+          # Wait for coordinator to be ready
+          MAX_ATTEMPTS={{ default 60 .maxAttempts }}
+          ATTEMPT=0
+
+          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+            if psql -c "SELECT 1" > /dev/null 2>&1; then
+              echo "PostgreSQL coordinator is ready!"
+              break
+            fi
+            ATTEMPT=$((ATTEMPT + 1))
+            echo "Waiting for PostgreSQL to be ready... (attempt $ATTEMPT/$MAX_ATTEMPTS)"
+            sleep {{ default 5 .retryDelaySeconds }}
+          done
+
+          if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
+            echo "ERROR: PostgreSQL did not become ready in time."
+            exit 1
+          fi
+
+          # Step 1: Create database and extensions on ALL WORKER NODES first
+          echo ""
+          echo "Step 1: Creating database '{{ .name }}' on worker nodes first..."
+
+          {{- if .workerGroups }}
+          # Use explicitly specified worker groups
+          WORKER_SERVICES="{{ range $i, $group := .workerGroups }}{{ if $i }} {{ end }}{{ $.Values.clusterName }}-{{ $group }}{{ end }}"
+          {{- else }}
+          # Get all worker services from coordinator metadata
+          export PGHOST=${COORDINATOR_SERVICE}
+          export PGDATABASE=citus
+          WORKER_SERVICES=$(psql -t -A -c "SELECT nodename FROM pg_dist_node WHERE noderole = 'primary' AND groupid > 0;")
+          {{- end }}
+
+          if [ -z "$WORKER_SERVICES" ]; then
+            echo "  WARNING: No worker nodes found. This is expected for coordinator-only deployments."
+          else
+            for WORKER_HOST in $WORKER_SERVICES; do
+              echo ""
+              echo "  Configuring worker: ${WORKER_HOST}"
+
+              # Wait for worker to be ready
+              WORKER_ATTEMPT=0
+              while [ $WORKER_ATTEMPT -lt $MAX_ATTEMPTS ]; do
+                if psql -h ${WORKER_HOST} -p {{ $.Values.ports.postgresql }} -U ${PGUSER} -d postgres -c "SELECT 1" > /dev/null 2>&1; then
+                  echo "    Worker ${WORKER_HOST} is ready!"
+                  break
+                fi
+                WORKER_ATTEMPT=$((WORKER_ATTEMPT + 1))
+                if [ $((WORKER_ATTEMPT % 10)) -eq 0 ]; then
+                  echo "    Waiting for worker ${WORKER_HOST}... (attempt $WORKER_ATTEMPT/$MAX_ATTEMPTS)"
+                fi
+                sleep {{ default 5 .retryDelaySeconds }}
+              done
+
+              if [ $WORKER_ATTEMPT -eq $MAX_ATTEMPTS ]; then
+                echo "    ERROR: Worker ${WORKER_HOST} did not become ready in time."
+                exit 1
+              fi
+
+              # Create database on worker if it doesn't exist
+              if psql -h ${WORKER_HOST} -p {{ $.Values.ports.postgresql }} -U ${PGUSER} -d postgres -lqt | cut -d \| -f 1 | grep -qw {{ .name }}; then
+                echo "    Database '{{ .name }}' already exists on ${WORKER_HOST}"
+              else
+                echo "    Creating database '{{ .name }}' on ${WORKER_HOST}..."
+                psql -h ${WORKER_HOST} -p {{ $.Values.ports.postgresql }} -U ${PGUSER} -d postgres \
+                  -c "CREATE DATABASE {{ .name }}{{ if .owner }} OWNER {{ .owner }}{{ end }};" || {
+                  echo "    ERROR: Failed to create database on ${WORKER_HOST}"
+                  exit 1
+                }
+                echo "    Database created successfully on ${WORKER_HOST}!"
+              fi
+
+              # Enable Citus extension on worker
+              echo "    Enabling Citus extension on ${WORKER_HOST}..."
+              psql -h ${WORKER_HOST} -p {{ $.Values.ports.postgresql }} -U ${PGUSER} -d {{ .name }} \
+                -c "CREATE EXTENSION IF NOT EXISTS citus CASCADE;" || {
+                echo "    ERROR: Failed to enable Citus extension on ${WORKER_HOST}"
+                exit 1
+              }
+
+              # Enable additional extensions on worker
+              {{- if .extensions }}
+              {{- $dbName := .name }}
+              {{- range .extensions }}
+              echo "    Enabling extension {{ . }} on ${WORKER_HOST}..."
+              psql -h ${WORKER_HOST} -p {{ $.Values.ports.postgresql }} -U ${PGUSER} -d {{ $dbName }} \
+                -c "CREATE EXTENSION IF NOT EXISTS {{ . }} CASCADE;" || {
+                echo "    WARNING: Failed to enable extension {{ . }} on ${WORKER_HOST}"
+              }
+              {{- end }}
+              {{- end }}
+
+              echo "    Worker ${WORKER_HOST} configured successfully!"
+            done
+            echo ""
+            echo "  All workers configured successfully!"
+          fi
+
+          # Step 2: Now create database on coordinator
+          echo ""
+          echo "Step 2: Creating database '{{ .name }}' on coordinator..."
+          export PGHOST=${COORDINATOR_SERVICE}
+          export PGDATABASE=postgres
+
+          if psql -lqt | cut -d \| -f 1 | grep -qw {{ .name }}; then
+            echo "  Database '{{ .name }}' already exists on coordinator."
+          else
+            psql -c "CREATE DATABASE {{ .name }}{{ if .owner }} OWNER {{ .owner }}{{ end }};"
+            echo "  Database '{{ .name }}' created successfully on coordinator!"
+          fi
+
+          # Switch to the new database on coordinator
+          export PGDATABASE={{ .name }}
+
+          # Enable Citus extension on coordinator
+          echo ""
+          echo "Step 3: Enabling Citus extension on coordinator..."
+          psql -c "CREATE EXTENSION IF NOT EXISTS citus CASCADE;"
+          echo "  Citus extension enabled on coordinator!"
+
+          # Enable additional extensions on coordinator
+          {{- if .extensions }}
+          echo ""
+          echo "Step 4: Enabling additional extensions on coordinator..."
+          {{- range .extensions }}
+          echo "  - Enabling extension: {{ . }}"
+          psql -c "CREATE EXTENSION IF NOT EXISTS {{ . }} CASCADE;" || {
+            echo "    WARNING: Failed to enable extension {{ . }}"
+          }
+          {{- end }}
+          echo "  Additional extensions enabled on coordinator!"
+          {{- end }}
+
+          {{- if $.Values.ssl.enabled }}
+          # Configure pg_dist_authinfo for SSL certificate authentication
+          echo ""
+          echo "Step 5: Configuring SSL certificate authentication (pg_dist_authinfo)..."
+
+          # Verify citus.node_conninfo is configured (set globally in postgresql.conf)
+          NODE_CONNINFO=$(psql -t -A -c "SHOW citus.node_conninfo;")
+          echo "  Current citus.node_conninfo: ${NODE_CONNINFO}"
+          if echo "${NODE_CONNINFO}" | grep -q "sslcert"; then
+            echo "  ✓ SSL certificate authentication is configured globally"
+          else
+            echo "  ⚠ WARNING: SSL certificates not found in citus.node_conninfo"
+            echo "  This may cause authentication failures when adding workers"
+          fi
+
+          # Add authentication info for coordinator (nodeid 0)
+          echo "  Configuring authentication for coordinator (nodeid=0)..."
+          psql -c "INSERT INTO pg_dist_authinfo (nodeid, rolename, authinfo)
+                   VALUES (0, '{{ $.Values.patroni.superuser.username }}',
+                           'password=${POSTGRES_PASSWORD} sslcert=/etc/ssl/certs/postgresql/server.crt sslkey=/etc/ssl/certs/postgresql/server.key')
+                   ON CONFLICT (nodeid, rolename) DO UPDATE
+                   SET authinfo = EXCLUDED.authinfo;" || {
+            echo "    WARNING: Failed to configure pg_dist_authinfo for coordinator"
+          }
+          echo "  Coordinator authentication configured!"
+          {{- end }}
+
+          # Add worker nodes to Citus metadata (required for distributed tables)
+          echo ""
+          echo "Step 6: Adding worker nodes to Citus metadata..."
+
+          {{- if $.Values.pgpass.enabled }}
+          # Debug: Verify .pgpass file exists and is readable
+          if [ -f "${PGPASSFILE}" ]; then
+            echo "  DEBUG: .pgpass file found at ${PGPASSFILE}"
+            echo "  DEBUG: .pgpass file permissions: $(ls -l ${PGPASSFILE})"
+            echo "  DEBUG: .pgpass file contents (passwords masked):"
+            sed 's/:[^:]*$/:*****/' ${PGPASSFILE} | head -5
+          else
+            echo "  WARNING: .pgpass file not found at ${PGPASSFILE}"
+          fi
+          {{- end }}
+
+          # Check if we need to add workers (skip if already registered)
+          WORKER_COUNT=$(psql -t -A -c "SELECT COUNT(*) FROM pg_dist_node WHERE noderole = 'primary' AND groupid > 0;")
+
+          if [ "$WORKER_COUNT" -eq "0" ]; then
+            {{- if .workerGroups }}
+            # Explicitly specified worker groups for this database
+            echo "  Adding explicitly specified worker groups: {{ join ", " .workerGroups }}"
+            {{- range .workerGroups }}
+            WORKER_SERVICE="{{ $.Values.clusterName }}-{{ . }}"
+            WORKER_PORT={{ $.Values.ports.postgresql }}
+            echo "  Adding worker group {{ . }}: ${WORKER_SERVICE}:${WORKER_PORT}"
+            psql -c "SELECT * FROM citus_add_node('${WORKER_SERVICE}', ${WORKER_PORT});" || {
+              echo "    WARNING: Failed to add worker ${WORKER_SERVICE}:${WORKER_PORT}"
+            }
+            {{- end }}
+            echo "  Explicitly specified workers added successfully!"
+            {{- else }}
+            # No explicit worker groups - add all workers from coordinator metadata
+            echo "  No explicit worker groups specified. Adding all workers from coordinator database..."
+
+            # Get workers from the main 'citus' database on coordinator
+            export PGDATABASE=citus
+            WORKERS=$(psql -t -A -c "SELECT nodename, nodeport FROM pg_dist_node WHERE noderole = 'primary' AND groupid > 0;")
+
+            if [ -z "$WORKERS" ]; then
+              echo "  WARNING: No worker nodes found in coordinator metadata."
+              echo "  This is expected for coordinator-only deployments or initial setup."
+            else
+              # Switch back to the new database
+              export PGDATABASE={{ .name }}
+
+              echo "$WORKERS" | while IFS='|' read -r WORKER_HOST WORKER_PORT; do
+                echo "  Adding worker: ${WORKER_HOST}:${WORKER_PORT}"
+                psql -c "SELECT * FROM citus_add_node('${WORKER_HOST}', ${WORKER_PORT});" || {
+                  echo "    WARNING: Failed to add worker ${WORKER_HOST}:${WORKER_PORT}"
+                }
+              done
+              echo "  Workers added successfully!"
+            fi
+            {{- end }}
+          else
+            echo "  Workers already registered (count: $WORKER_COUNT). Skipping worker registration."
+          fi
+
+          # Run custom SQL initialization if provided
+          {{- if .initSQL }}
+          echo ""
+          echo "Step 7: Running custom initialization SQL..."
+          cat <<'INIT_SQL' | psql
+{{ .initSQL | nindent 10 }}
+          INIT_SQL
+          echo "  Custom SQL executed successfully!"
+          {{- end }}
+
+          # Set database-level configuration parameters
+          {{- if .parameters }}
+          echo ""
+          echo "Step 8: Setting database-level parameters..."
+          {{- $dbName := .name }}
+          {{- range $key, $value := .parameters }}
+          echo "  - Setting {{ $key }} = {{ $value }}"
+          psql -c "ALTER DATABASE {{ $dbName }} SET {{ $key }} = '{{ $value }}';"
+          {{- end }}
+          echo "  Parameters set successfully!"
+          {{- end }}
+
+          echo ""
+          echo "========================================"
+          echo "Database '{{ .name }}' is ready!"
+          echo "========================================"
+          echo ""
+          echo "Connection details:"
+          echo "  Host: ${COORDINATOR_SERVICE}"
+          echo "  Port: {{ $.Values.ports.postgresql }}"
+          echo "  Database: {{ .name }}"
+          echo "  User: {{ $.Values.patroni.superuser.username }}"
+          echo ""
+          echo "To connect:"
+          echo "  kubectl exec -it {{ $.Values.clusterName }}-0-0 -- psql -U {{ $.Values.patroni.superuser.username }} -d {{ .name }}"
+          echo ""
+          echo "To create distributed tables:"
+          echo "  SELECT create_distributed_table('table_name', 'distribution_column');"
+          echo ""
+        env:
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ $.Values.secret.name }}
+              key: {{ $.Values.secret.keys.superuserPassword }}
+      {{- if $.Values.pgpass.enabled }}
+        - name: PGPASSFILE
+          value: /home/postgres/.pgpass
+      {{- end }}
+      {{- if $.Values.ssl.enabled }}
+        - name: PGSSLMODE
+          value: {{ $.Values.ssl.mode }}
+        - name: PGSSLROOTCERT
+          value: /etc/ssl/certs/postgresql/ca.crt
+        - name: PGSSLCERT
+          value: /etc/ssl/certs/postgresql/server.crt
+        - name: PGSSLKEY
+          value: /etc/ssl/certs/postgresql/server.key
+      {{- end }}
+        volumeMounts:
+        {{- if $.Values.ssl.enabled }}
+          - mountPath: /etc/ssl/certs/postgresql
+            name: ssl-certs-writable
+            readOnly: true
+        {{- end }}
+        {{- if $.Values.pgpass.enabled }}
+          - name: pgpass-config
+            mountPath: /home/postgres/.pgpass
+            subPath: .pgpass
+            readOnly: true
+        {{- end }}
+      volumes:
+      {{- if $.Values.ssl.enabled }}
+        - name: ssl-certs
+          secret:
+            secretName: {{ $.Values.ssl.secretName }}
+        - name: ssl-certs-writable  # EmptyDir for writable copies
+          emptyDir: {}
+      {{- end }}
+      {{- if $.Values.pgpass.enabled }}
+        - name: pgpass-template
+          configMap:
+            name: {{ include "citus-cluster.fullname" $ }}-pgpass
+        - name: pgpass-config
+          emptyDir: {}
+      {{- end }}
+{{- end }}

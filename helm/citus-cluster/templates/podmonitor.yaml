@@ -1,0 +1,137 @@
+{{- if and .Values.monitoring.enabled .Values.monitoring.podMonitor.enabled }}
+---
+# PodMonitor for Coordinator
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: {{ .Values.clusterName }}-coordinator
+  namespace: {{ default .Release.Namespace .Values.monitoring.podMonitor.namespace }}
+  labels:
+    {{- include "citus-cluster.coordinatorLabels" . | nindent 4 }}
+    {{- with .Values.monitoring.podMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- with .Values.monitoring.podMonitor.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "citus-cluster.coordinatorLabels" . | nindent 6 }}
+  podMetricsEndpoints:
+    # Patroni REST API metrics
+    - port: {{ .Values.ports.restapi }}
+      path: /metrics
+      interval: {{ .Values.monitoring.podMonitor.interval }}
+      scrapeTimeout: {{ .Values.monitoring.podMonitor.scrapeTimeout }}
+      scheme: http
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_name]
+          targetLabel: pod
+        - sourceLabels: [__meta_kubernetes_namespace]
+          targetLabel: namespace
+        - sourceLabels: [__meta_kubernetes_pod_label_citus_group]
+          targetLabel: citus_group
+        - sourceLabels: [__meta_kubernetes_pod_label_citus_type]
+          targetLabel: citus_type
+        - sourceLabels: [__meta_kubernetes_pod_label_cluster_name]
+          targetLabel: cluster_name
+        - sourceLabels: [__meta_kubernetes_pod_label_role]
+          targetLabel: role
+    {{- if .Values.monitoring.postgresExporter.enabled }}
+    # PostgreSQL exporter metrics
+    - port: {{ .Values.monitoring.postgresExporter.port }}
+      path: /metrics
+      interval: {{ .Values.monitoring.podMonitor.interval }}
+      scrapeTimeout: {{ .Values.monitoring.podMonitor.scrapeTimeout }}
+      scheme: http
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_name]
+          targetLabel: pod
+        - sourceLabels: [__meta_kubernetes_namespace]
+          targetLabel: namespace
+        - sourceLabels: [__meta_kubernetes_pod_label_citus_group]
+          targetLabel: citus_group
+        - sourceLabels: [__meta_kubernetes_pod_label_citus_type]
+          targetLabel: citus_type
+        - sourceLabels: [__meta_kubernetes_pod_label_cluster_name]
+          targetLabel: cluster_name
+        - sourceLabels: [__meta_kubernetes_pod_label_role]
+          targetLabel: role
+    {{- end }}
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+---
+{{- range $worker := .Values.workers }}
+# PodMonitor for Worker {{ $worker.citusGroup }}
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: {{ $.Values.clusterName }}-worker-{{ $worker.citusGroup }}
+  namespace: {{ default $.Release.Namespace $.Values.monitoring.podMonitor.namespace }}
+  labels:
+    application: {{ $.Values.application }}
+    cluster-name: {{ $.Values.clusterName }}
+    citus-group: {{ $worker.citusGroup | quote }}
+    citus-type: {{ $worker.citusType }}
+    {{- with $.Values.monitoring.podMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- with $.Values.monitoring.podMonitor.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      application: {{ $.Values.application }}
+      cluster-name: {{ $.Values.clusterName }}
+      citus-group: {{ $worker.citusGroup | quote }}
+      citus-type: {{ $worker.citusType }}
+  podMetricsEndpoints:
+    # Patroni REST API metrics
+    - port: {{ $.Values.ports.restapi }}
+      path: /metrics
+      interval: {{ $.Values.monitoring.podMonitor.interval }}
+      scrapeTimeout: {{ $.Values.monitoring.podMonitor.scrapeTimeout }}
+      scheme: http
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_name]
+          targetLabel: pod
+        - sourceLabels: [__meta_kubernetes_namespace]
+          targetLabel: namespace
+        - sourceLabels: [__meta_kubernetes_pod_label_citus_group]
+          targetLabel: citus_group
+        - sourceLabels: [__meta_kubernetes_pod_label_citus_type]
+          targetLabel: citus_type
+        - sourceLabels: [__meta_kubernetes_pod_label_cluster_name]
+          targetLabel: cluster_name
+        - sourceLabels: [__meta_kubernetes_pod_label_role]
+          targetLabel: role
+    {{- if $.Values.monitoring.postgresExporter.enabled }}
+    # PostgreSQL exporter metrics
+    - port: {{ $.Values.monitoring.postgresExporter.port }}
+      path: /metrics
+      interval: {{ $.Values.monitoring.podMonitor.interval }}
+      scrapeTimeout: {{ $.Values.monitoring.podMonitor.scrapeTimeout }}
+      scheme: http
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_name]
+          targetLabel: pod
+        - sourceLabels: [__meta_kubernetes_pod_namespace]
+          targetLabel: namespace
+        - sourceLabels: [__meta_kubernetes_pod_label_citus_group]
+          targetLabel: citus_group
+        - sourceLabels: [__meta_kubernetes_pod_label_citus_type]
+          targetLabel: citus_type
+        - sourceLabels: [__meta_kubernetes_pod_label_cluster_name]
+          targetLabel: cluster_name
+        - sourceLabels: [__meta_kubernetes_pod_label_role]
+          targetLabel: role
+    {{- end }}
+  namespaceSelector:
+    matchNames:
+      - {{ $.Release.Namespace }}
+---
+{{- end }}
+{{- end }}

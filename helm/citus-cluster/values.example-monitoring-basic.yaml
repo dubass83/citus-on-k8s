@@ -1,0 +1,115 @@
+# Example: Basic Monitoring Setup
+#
+# This configuration enables basic monitoring with postgres_exporter
+# and custom Citus queries, suitable for manual Prometheus scraping.
+#
+# Use case:
+#   - Standalone Prometheus (not Operator)
+#   - Manual scrape configuration
+#   - Development/testing environments
+#
+# Deploy with:
+#   helm install citusdemo ./helm/citus-cluster -f values.example-monitoring-basic.yaml
+
+clusterName: citusdemo
+application: patroni
+
+# Docker image
+image:
+  repository: patroni-citus-k8s
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+# Coordinator configuration
+coordinator:
+  enabled: true
+  citusGroup: "0"
+  replicas: 3
+
+# Worker groups
+workers:
+  - citusGroup: "1"
+    replicas: 2
+  - citusGroup: "2"
+    replicas: 2
+
+# Monitoring configuration - BASIC
+monitoring:
+  # Enable monitoring components
+  enabled: true
+
+  # postgres_exporter configuration
+  postgresExporter:
+    enabled: true
+    image:
+      repository: quay.io/prometheuscommunity/postgres-exporter
+      tag: v0.15.0
+      pullPolicy: IfNotPresent
+    port: 9187
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi
+    # Enable custom Citus queries
+    customQueries:
+      enabled: true
+
+  # ServiceMonitor disabled (for standalone Prometheus)
+  serviceMonitor:
+    enabled: false
+
+  # PodMonitor disabled
+  podMonitor:
+    enabled: false
+
+  # Grafana dashboards disabled (manual import)
+  grafanaDashboards:
+    enabled: false
+
+# Patroni configuration
+patroni:
+  scope: citusdemo
+  database: citus
+  superuser:
+    username: postgres
+    password: zalando
+  replication:
+    username: standby
+    password: rep-pass
+
+# Storage - emptyDir for testing
+storage:
+  persistentVolume:
+    enabled: false
+
+# Note: After deploying, add this to your Prometheus scrape config:
+#
+# scrape_configs:
+#   - job_name: 'citus-patroni'
+#     static_configs:
+#       - targets: ['citusdemo-0.default.svc.cluster.local:8008']
+#         labels:
+#           cluster: 'citusdemo'
+#           citus_group: '0'
+#           citus_type: 'coordinator'
+#       - targets: ['citusdemo-1.default.svc.cluster.local:8008']
+#         labels:
+#           cluster: 'citusdemo'
+#           citus_group: '1'
+#           citus_type: 'worker'
+#
+#   - job_name: 'citus-postgres'
+#     static_configs:
+#       - targets: ['citusdemo-0.default.svc.cluster.local:9187']
+#         labels:
+#           cluster: 'citusdemo'
+#           citus_group: '0'
+#           citus_type: 'coordinator'
+#       - targets: ['citusdemo-1.default.svc.cluster.local:9187']
+#         labels:
+#           cluster: 'citusdemo'
+#           citus_group: '1'
+#           citus_type: 'worker'

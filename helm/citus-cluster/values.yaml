@@ -1,0 +1,376 @@
+# Default values for citus-cluster.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+# Cluster name
+clusterName: citusdemo
+
+# Application label
+application: patroni
+
+# Docker image configuration
+image:
+  repository: patroni-citus-k8s
+  pullPolicy: IfNotPresent
+  tag: "latest"
+
+# Coordinator configuration (citus group 0)
+coordinator:
+  enabled: true
+  citusGroup: "0"
+  citusType: coordinator
+  replicas: 3
+  # Resource requests and limits for the main postgres container
+  # IMPORTANT: These should be tuned based on your workload
+  # For production, set limits higher and adjust based on monitoring
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: 2000m
+      memory: 2Gi
+
+# Worker groups configuration
+# Each worker group can have its own resource configuration
+workers:
+  # Worker group 1
+  - citusGroup: "1"
+    citusType: worker
+    replicas: 2
+    # Resource requests and limits for the main postgres container
+    # Workers typically need more resources than coordinators as they store data
+    resources:
+      requests:
+        cpu: 500m
+        memory: 1Gi
+      limits:
+        cpu: 2000m
+        memory: 4Gi
+  # # Worker group 2
+  # - citusGroup: "2"
+  #   citusType: worker
+  #   replicas: 2
+  #   resources:
+  #     requests:
+  #       cpu: 500m
+  #       memory: 1Gi
+  #     limits:
+  #       cpu: 2000m
+  #       memory: 4Gi
+
+# Secret configuration
+secret:
+  # Set create to false to use an existing secret
+  create: true
+  # Name of the secret to create or use
+  name: citusdemo
+  # Keys in the secret for passwords (only used when create: false)
+  # When using an existing secret, ensure it has these keys
+  keys:
+    superuserPassword: superuser-password
+    replicationPassword: replication-password
+
+# Patroni configuration
+patroni:
+  scope: citusdemo
+  database: citus
+  superuser:
+    username: postgres
+    # Password is only used when secret.create is true
+    password: zalando # base64: emFsYW5kbw==
+  replication:
+    username: standby
+    # Password is only used when secret.create is true
+    password: rep-pass # base64: cmVwLXBhc3M=
+  kubernetes:
+    bypassApiService: "true"
+    useEndpoints: "true"
+  postgresql:
+    dataDir: /home/postgres/pgdata/pgroot/data
+    pgpass: /tmp/pgpass
+    listen: "0.0.0.0:5432"
+    # PostgreSQL parameters (configurable via Helm)
+    # These can be modified without rebuilding the Docker image
+    # For parameters requiring restart, use: kubectl rollout restart statefulset
+    parameters:
+      # Connection Settings
+      max_connections: 200
+
+      # Memory Settings
+      shared_buffers: 16MB # Should be 25% of RAM for production
+      work_mem: 4MB # Memory per query operation
+      maintenance_work_mem: 64MB # Memory for maintenance operations
+      effective_cache_size: 128MB # Estimate of OS cache
+      wal_buffers: 16MB # WAL buffer size
+
+      # Locking
+      max_locks_per_transaction: 512 # Critical for distributed operations
+
+      # Query Planner
+      random_page_cost: 1.1 # Lower for SSD storage
+      checkpoint_completion_target: 0.9 # Spread out checkpoint writes
+
+      # Extensions
+      shared_preload_libraries: "pg_partman_bgw" # Preloaded extensions
+
+      # SSL (managed via environment variables, not directly configurable here)
+      # ssl: 'on'
+      # ssl_ca_file, ssl_cert_file, ssl_key_file set via PGSSLROOTCERT, PGSSLCERT, PGSSLKEY
+  restapi:
+    listen: "0.0.0.0:8008"
+
+# Service configuration
+service:
+  type: ClusterIP
+  port: 5432
+  targetPort: 5432
+
+# Probes configuration
+readinessProbe:
+  httpGet:
+    scheme: HTTP
+    path: /readiness
+    port: 8008
+  initialDelaySeconds: 3
+  periodSeconds: 10
+  timeoutSeconds: 5
+  successThreshold: 1
+  failureThreshold: 3
+
+# Ports configuration
+ports:
+  restapi: 8008
+  postgresql: 5432
+
+# Storage configuration
+storage:
+  # Use emptyDir by default (for demo purposes)
+  # Set enabled: true to use PersistentVolumeClaims
+  persistentVolume:
+    enabled: false
+    storageClass: ""
+    size: 5Gi
+    accessModes:
+      - ReadWriteOnce
+
+# Pod configuration
+podSpec:
+  terminationGracePeriodSeconds: 0
+
+# Init container configuration for fixing permissions
+initContainer:
+  enabled: true
+  userId: 999
+  groupId: 999
+  pgdataDir: /home/postgres/pgdata
+
+# ServiceAccount name
+serviceAccount:
+  create: true
+  name: citusdemo
+
+# RBAC configuration
+rbac:
+  create: true
+  # ClusterRole/ClusterRoleBinding for bypassing API service
+  createClusterRole: true
+
+# Namespace (used for ClusterRoleBinding)
+namespace: default
+
+# SSL/TLS configuration
+ssl:
+  # Enable SSL/TLS with proper certificates
+  enabled: false
+  # SSL mode: disable, allow, prefer, require, verify-ca, verify-full
+  # - prefer: Try SSL, fall back to non-SSL (default, no cert validation)
+  # - require: Always use SSL (no cert validation)
+  # - verify-ca: Always use SSL and verify CA certificate
+  # - verify-full: Always use SSL and verify CA + hostname
+  mode: verify-ca
+  # Name of the Kubernetes secret containing SSL certificates
+  secretName: citusdemo-ssl-certs
+  # Create secret from values (only for testing, not recommended for production)
+  createSecret: false
+  # Certificate values (only used when createSecret: true)
+  # These should be the actual certificate content, not base64 encoded
+  caCrt: ""
+  serverCrt: ""
+  serverKey: ""
+
+# Additional PostgreSQL extensions configuration for main database
+# patroni.database: citus
+additionalExtensions:
+  # Enable additional extensions installation job
+  enabled: false
+  # Maximum number of attempts to wait for PostgreSQL to be ready
+  maxAttempts: 60
+  # Delay in seconds between retry attempts
+  retryDelaySeconds: 5
+  # Number of times to retry the job on failure
+  backoffLimit: 3
+  # [DEPRECATED] Enable extensions on worker nodes (in addition to coordinator)
+  # When you create certain extensions on the Citus coordinator,
+  # Citus automatically creates them on all worker nodes too.
+  enableOnWorkers: false
+  # Extensions to enable
+  extensions:
+    - postgis
+    - postgis_topology
+    - pg_partman
+
+# Additional databases to create with Citus and extensions enabled
+# This allows you to create multiple databases beyond the default 'citus' database
+#
+# AUTOMATED SETUP PROCESS:
+# The Helm chart creates a post-install/post-upgrade Job that automatically:
+#   1. Creates database on ALL WORKER NODES first (with Citus + extensions)
+#   2. Creates database on COORDINATOR (with Citus + extensions)
+#   3. Configures pg_dist_authinfo for SSL certificate authentication (if SSL enabled)
+#   4. Registers worker nodes in Citus metadata using citus_add_node()
+#   5. Runs custom initialization SQL (if provided)
+#
+# This ensures proper distributed setup with full SSL certificate authentication support.
+additionalDatabases: []
+  # Example configuration:
+  # - name: skymap
+  #   owner: postgres  # Optional: database owner (default: postgres)
+  #   maxAttempts: 60  # Optional: wait attempts for nodes to be ready (default: 60)
+  #   retryDelaySeconds: 5  # Optional: seconds between retries (default: 5)
+  #   backoffLimit: 3  # Optional: job retry limit on failure (default: 3)
+  #
+  #   # Optional: Explicitly specify which worker groups to add to this database
+  #   # If not specified, all workers from coordinator metadata will be added
+  #   # Use this to create databases that only use a subset of workers
+  #   workerGroups:
+  #     - "1"  # Add worker group 1
+  #     - "2"  # Add worker group 2
+  #   # Note: This uses service names (e.g., citusdemo-1, citusdemo-2)
+  #
+  #   # Extensions to enable on this database (in addition to citus)
+  #   # These will be installed on BOTH workers and coordinator automatically
+  #   extensions:
+  #     - postgis
+  #     - postgis_topology
+  #     - pg_partman
+  #
+  #   # Optional: Custom SQL to run after database creation and extension setup
+  #   # This runs ONLY on coordinator after workers are registered
+  #   initSQL: |
+  #     -- Create schemas
+  #     CREATE SCHEMA IF NOT EXISTS analytics;
+  #     CREATE SCHEMA IF NOT EXISTS staging;
+  #
+  #     -- Create roles
+  #     CREATE ROLE skymap_reader WITH LOGIN PASSWORD 'reader123';
+  #     GRANT CONNECT ON DATABASE skymap TO skymap_reader;
+  #     GRANT SELECT ON ALL TABLES IN SCHEMA public TO skymap_reader;
+  #
+  #   # Optional: Database-level parameter overrides
+  #   parameters:
+  #     timezone: "UTC"
+  #     pg_partman_bgw.dbname: "skymap"  # Example: enable pg_partman BGW for this database
+
+# .pgpass file configuration for Citus inter-node authentication
+# This creates a ConfigMap with .pgpass entries and mounts it in all pods
+# Useful when using password-based authentication for citus_add_node()
+pgpass:
+  # Enable .pgpass file mounting
+  enabled: false
+
+  # Custom entries (optional)
+  # The password placeholder ${POSTGRES_PASSWORD} will be substituted with actual password
+  entries: []
+    # Example:
+    # - host: "*.example.com"
+    #   port: 5432
+    #   database: "*"
+    #   username: "postgres"
+    # - host: "external-pg-host"
+    #   port: 5433
+    #   database: "mydb"
+    #   username: "appuser"
+
+  # Include worker IPs in .pgpass (requires dynamic lookup, not recommended)
+  includeWorkerIPs: false
+
+# Monitoring configuration
+monitoring:
+  # Enable monitoring components (postgres_exporter sidecar)
+  enabled: false
+
+  # postgres_exporter configuration
+  # Exports PostgreSQL metrics in Prometheus format
+  postgresExporter:
+    # Enable postgres_exporter sidecar container in all pods
+    enabled: true
+    image:
+      repository: quay.io/prometheuscommunity/postgres-exporter
+      tag: v0.15.0
+      pullPolicy: IfNotPresent
+    # Port for metrics endpoint
+    port: 9187
+    # Resource requests and limits
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi
+    # Custom queries for Citus-specific metrics
+    customQueries:
+      # Enable mounting custom queries ConfigMap
+      enabled: true
+      # ConfigMap name (auto-generated: {clusterName}-exporter-queries)
+      configMapName: ""
+
+  # ServiceMonitor for Prometheus Operator
+  # Creates ServiceMonitor CRD for automatic scraping
+  serviceMonitor:
+    enabled: false
+    # Namespace where ServiceMonitor should be created (empty = same as chart)
+    namespace: ""
+    # How often to scrape metrics
+    interval: 15s
+    # Scrape timeout
+    scrapeTimeout: 10s
+    # Labels to apply to ServiceMonitor
+    labels: {}
+    # Additional labels for Prometheus selector matching
+    additionalLabels: {}
+      # Example: prometheus: kube-prometheus
+
+  # PodMonitor as alternative to ServiceMonitor
+  # Scrapes metrics directly from pods instead of services
+  podMonitor:
+    enabled: false
+    # Namespace where PodMonitor should be created (empty = same as chart)
+    namespace: ""
+    # How often to scrape metrics
+    interval: 15s
+    # Scrape timeout
+    scrapeTimeout: 10s
+    # Labels to apply to PodMonitor
+    labels: {}
+    # Additional labels for Prometheus selector matching
+    additionalLabels: {}
+
+  # Grafana dashboard ConfigMaps
+  # Creates ConfigMaps with pre-built dashboards
+  grafanaDashboards:
+    enabled: false
+    # Namespace where dashboard ConfigMaps should be created (empty = same as chart)
+    namespace: ""
+    # Labels for Grafana sidecar discovery
+    labels:
+      grafana_dashboard: "1"
+    # Which dashboards to create
+    dashboards:
+      # Patroni cluster health (based on Grafana dashboard 18870)
+      patroni: true
+      # PostgreSQL metrics (based on Grafana dashboard 9628)
+      postgresql: true
+      # Custom Citus distribution metrics
+      citus: true

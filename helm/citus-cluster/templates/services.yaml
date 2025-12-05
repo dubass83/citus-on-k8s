@@ -1,0 +1,138 @@
+{{- if .Values.coordinator.enabled }}
+# Coordinator Endpoints
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: {{ .Values.clusterName }}-{{ .Values.coordinator.citusGroup }}
+  labels:
+    {{- include "citus-cluster.coordinatorLabels" . | nindent 4 }}
+subsets: []
+---
+# Coordinator Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.clusterName }}-{{ .Values.coordinator.citusGroup }}
+  labels:
+    {{- include "citus-cluster.coordinatorLabels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: {{ .Values.service.targetPort }}
+{{- end }}
+---
+{{- if and .Values.coordinator.enabled .Values.monitoring.enabled }}
+# Coordinator Monitoring Service (with selector for metrics endpoints)
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.clusterName }}-{{ .Values.coordinator.citusGroup }}-metrics
+  labels:
+    {{- include "citus-cluster.coordinatorLabels" . | nindent 4 }}
+  {{- if and (not .Values.monitoring.serviceMonitor.enabled) (not .Values.monitoring.podMonitor.enabled) }}
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "{{ .Values.monitoring.postgresExporter.port }}"
+    prometheus.io/path: "/metrics"
+  {{- end }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "citus-cluster.coordinatorLabels" . | nindent 4 }}
+  ports:
+    - port: {{ .Values.ports.restapi }}
+      targetPort: {{ .Values.ports.restapi }}
+      name: patroni
+    {{- if .Values.monitoring.postgresExporter.enabled }}
+    - port: {{ .Values.monitoring.postgresExporter.port }}
+      targetPort: {{ .Values.monitoring.postgresExporter.port }}
+      name: metrics
+    {{- end }}
+{{- end }}
+---
+{{- range $worker := .Values.workers }}
+# Worker {{ $worker.citusGroup }} Endpoints
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: {{ $.Values.clusterName }}-{{ $worker.citusGroup }}
+  labels:
+    application: {{ $.Values.application }}
+    cluster-name: {{ $.Values.clusterName }}
+    citus-group: {{ $worker.citusGroup | quote }}
+    citus-type: {{ $worker.citusType }}
+subsets: []
+---
+# Worker {{ $worker.citusGroup }} Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $.Values.clusterName }}-{{ $worker.citusGroup }}
+  labels:
+    application: {{ $.Values.application }}
+    cluster-name: {{ $.Values.clusterName }}
+    citus-group: {{ $worker.citusGroup | quote }}
+    citus-type: {{ $worker.citusType }}
+spec:
+  type: {{ $.Values.service.type }}
+  ports:
+    - port: {{ $.Values.service.port }}
+      targetPort: {{ $.Values.service.targetPort }}
+---
+{{- if $.Values.monitoring.enabled }}
+# Worker {{ $worker.citusGroup }} Monitoring Service (with selector for metrics endpoints)
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $.Values.clusterName }}-{{ $worker.citusGroup }}-metrics
+  labels:
+    application: {{ $.Values.application }}
+    cluster-name: {{ $.Values.clusterName }}
+    citus-group: {{ $worker.citusGroup | quote }}
+    citus-type: {{ $worker.citusType }}
+  {{- if and (not $.Values.monitoring.serviceMonitor.enabled) (not $.Values.monitoring.podMonitor.enabled) }}
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "{{ $.Values.monitoring.postgresExporter.port }}"
+    prometheus.io/path: "/metrics"
+  {{- end }}
+spec:
+  type: ClusterIP
+  selector:
+    application: {{ $.Values.application }}
+    cluster-name: {{ $.Values.clusterName }}
+    citus-group: {{ $worker.citusGroup | quote }}
+    citus-type: {{ $worker.citusType }}
+  ports:
+    - port: {{ $.Values.ports.restapi }}
+      targetPort: {{ $.Values.ports.restapi }}
+      name: patroni
+    {{- if $.Values.monitoring.postgresExporter.enabled }}
+    - port: {{ $.Values.monitoring.postgresExporter.port }}
+      targetPort: {{ $.Values.monitoring.postgresExporter.port }}
+      name: metrics
+    {{- end }}
+---
+{{- end }}
+{{- end }}
+# Workers aggregate service (for primary workers)
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.clusterName }}-workers
+  labels:
+    application: {{ .Values.application }}
+    cluster-name: {{ .Values.clusterName }}
+    citus-type: worker
+    role: primary
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    application: {{ .Values.application }}
+    cluster-name: {{ .Values.clusterName }}
+    citus-type: worker
+    role: primary
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: {{ .Values.service.targetPort }}

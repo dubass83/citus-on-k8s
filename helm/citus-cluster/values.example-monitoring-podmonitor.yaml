@@ -1,0 +1,141 @@
+# Example: PodMonitor Monitoring Setup
+#
+# This configuration uses PodMonitor instead of ServiceMonitor
+# for direct pod-level metric scraping. Useful when you need
+# individual pod granularity for StatefulSet monitoring.
+#
+# Use case:
+#   - Prometheus Operator installed
+#   - Need per-pod metrics (not load-balanced through services)
+#   - Detailed pod-level troubleshooting
+#   - StatefulSet monitoring with pod identity preservation
+#
+# Deploy with:
+#   helm install citusdemo ./helm/citus-cluster -f values.example-monitoring-podmonitor.yaml
+
+clusterName: citusdemo
+application: patroni
+
+# Docker image
+image:
+  repository: patroni-citus-k8s
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+# Coordinator configuration
+coordinator:
+  enabled: true
+  citusGroup: "0"
+  replicas: 3
+
+# Worker groups
+workers:
+  - citusGroup: "1"
+    replicas: 2
+  - citusGroup: "2"
+    replicas: 2
+
+# Monitoring configuration - PODMONITOR
+monitoring:
+  # Enable monitoring components
+  enabled: true
+
+  # postgres_exporter configuration
+  postgresExporter:
+    enabled: true
+    image:
+      repository: quay.io/prometheuscommunity/postgres-exporter
+      tag: v0.15.0
+      pullPolicy: IfNotPresent
+    port: 9187
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi
+    # Enable custom Citus queries
+    customQueries:
+      enabled: true
+
+  # ServiceMonitor disabled (using PodMonitor instead)
+  serviceMonitor:
+    enabled: false
+
+  # PodMonitor for direct pod scraping
+  podMonitor:
+    enabled: true
+    # Leave namespace empty to use the same as the chart
+    namespace: ""
+    # Scrape interval
+    interval: 15s
+    scrapeTimeout: 10s
+    # Labels for PodMonitor resource
+    labels: {}
+    # Additional labels for Prometheus to select this PodMonitor
+    additionalLabels:
+      prometheus: kube-prometheus
+
+  # Grafana dashboards
+  grafanaDashboards:
+    enabled: true
+    namespace: ""
+    labels:
+      grafana_dashboard: "1"
+    dashboards:
+      patroni: true
+      postgresql: true
+      citus: true
+
+# Patroni configuration
+patroni:
+  scope: citusdemo
+  database: citus
+  superuser:
+    username: postgres
+    password: zalando
+  replication:
+    username: standby
+    password: rep-pass
+  postgresql:
+    parameters:
+      max_connections: 200
+      shared_buffers: 256MB
+      work_mem: 16MB
+      shared_preload_libraries: "pg_partman_bgw,pg_stat_statements"
+
+# Storage
+storage:
+  persistentVolume:
+    enabled: true
+    storageClass: ""
+    size: 10Gi
+    accessModes:
+      - ReadWriteOnce
+
+# PodMonitor vs ServiceMonitor:
+#
+# PodMonitor:
+#   ✓ Direct pod scraping (preserves pod identity)
+#   ✓ Individual pod metrics without load balancing
+#   ✓ Useful for StatefulSet pod-specific monitoring
+#   ✗ More scrape targets (one per pod)
+#
+# ServiceMonitor:
+#   ✓ Scrapes through Kubernetes services
+#   ✓ Fewer scrape targets (load-balanced)
+#   ✗ May lose pod identity in some configurations
+#
+# Use PodMonitor when:
+#   - Monitoring StatefulSets with stable pod identities
+#   - Need per-pod granularity for troubleshooting
+#   - Want to track metrics specific to individual pods (e.g., citusdemo-0-0, citusdemo-0-1)
+#
+# Verify deployment:
+#   kubectl get podmonitor -l cluster-name=citusdemo
+#
+# Check Prometheus targets:
+#   kubectl port-forward -n monitoring svc/prometheus-operated 9090:9090
+#   Open: http://localhost:9090/targets
+#   Look for individual pod targets (citusdemo-0-0, citusdemo-0-1, etc.)

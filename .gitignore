@@ -1,0 +1,41 @@
+# SSL Certificates - Never commit private keys!
+certs/
+*.key
+*.crt
+*.csr
+*.pem
+*.p12
+*.pfx
+
+# Kubernetes
+*.kubeconfig
+
+# Helm
+*.tgz
+charts/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.log
+*.tmp
+tmp/

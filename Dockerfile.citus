@@ -1,0 +1,73 @@
+FROM postgres:16
+
+ARG RELEASE_VERSION
+ARG CI_JOB_STARTED_AT
+ARG CI_COMMIT_SHORT_SHA
+
+LABEL org.label-schema.name="CITUS" \
+    org.opencontainers.version="${RELEASE_VERSION}" \
+    org.label-schema.build-date="${CI_JOB_STARTED_AT}" \
+    org.label-schema.vcs-ref="${CI_COMMIT_SHORT_SHA}" \
+    org.label-schema.schema-version="1.0"
+
+RUN export DEBIAN_FRONTEND=noninteractive \
+    && echo 'APT::Install-Recommends "0";\nAPT::Install-Suggests "0";' > /etc/apt/apt.conf.d/01norecommend \
+    && apt-get update -y \
+    && apt-get upgrade -y \
+    && apt-cache depends patroni | sed -n -e 's/.* Depends: \(python3-.\+\)$/\1/p' \
+    | grep -Ev '^python3-(sphinx|etcd|consul|kazoo|kubernetes)' \
+    | xargs apt-get install -y busybox vim-tiny curl jq less locales git python3-pip python3-wheel lsb-release \
+    ## Make sure we have a en_US.UTF-8 locale available
+    && localedef -i en_US -c -f UTF-8 -A /usr/share/locale/locale.alias en_US.UTF-8 \
+    ## Build Citus from source for all architectures to avoid GPG signature issues
+    && apt-get install -y postgresql-server-dev-16 \
+    gcc make autoconf \
+    libc6-dev flex libcurl4-gnutls-dev \
+    libicu-dev libkrb5-dev liblz4-dev \
+    libpam0g-dev libreadline-dev libselinux1-dev\
+    libssl-dev libxslt1-dev libzstd-dev uuid-dev \
+    libcurl3-gnutls \
+    && git clone -b "main" https://github.com/citusdata/citus.git \
+    && MAKEFLAGS="-j $(grep -c ^processor /proc/cpuinfo)" \
+    && cd citus && ./configure && make install && cd ../ && rm -rf /citus \
+    ## Install PostGIS and pg_partman
+    && apt-get install -y postgresql-16-postgis-3 postgresql-16-postgis-3-scripts \
+    postgresql-16-partman \
+    && pip3 install --break-system-packages setuptools \
+    && pip3 install --break-system-packages 'git+https://github.com/patroni/patroni.git#egg=patroni[kubernetes]' \
+    && PGHOME=/home/postgres \
+    && mkdir -p $PGHOME \
+    && chown postgres $PGHOME \
+    && sed -i "s|/var/lib/postgresql.*|$PGHOME:/bin/bash|" /etc/passwd \
+    && /bin/busybox --install -s \
+    # Set permissions for OpenShift
+    && chmod 775 $PGHOME \
+    && chmod 664 /etc/passwd \
+    # Clean up (keep PostGIS runtime dependencies)
+    && apt-get remove -y git python3-pip python3-wheel \
+    postgresql-server-dev-16 gcc make autoconf \
+    libc6-dev flex libicu-dev libkrb5-dev liblz4-dev \
+    libpam0g-dev libreadline-dev libselinux1-dev libssl-dev \
+    libxslt1-dev libzstd-dev uuid-dev \
+    && apt-get autoremove -y \
+    && apt-get clean -y \
+    && rm -rf /var/lib/apt/lists/* /root/.cache
+
+ADD entrypoint.sh /
+
+# Default SSL paths - will be overridden by env vars when using Kubernetes secrets
+ENV PGSSLMODE=prefer \
+    PGSSLKEY=/etc/ssl/private/ssl-cert-snakeoil.key \
+    PGSSLCERT=/etc/ssl/certs/ssl-cert-snakeoil.pem \
+    PGSSLROOTCERT=/etc/ssl/certs/ssl-cert-snakeoil.pem
+
+# Add basebackup checkpoint optimization to entrypoint
+# Note: PostgreSQL parameters are now configured via environment variables in entrypoint.sh
+# This allows dynamic configuration via Helm values without rebuilding the Docker image
+RUN sed -i 's/^postgresql:/&\n  basebackup:\n    checkpoint: fast/' /entrypoint.sh
+
+EXPOSE 5432 8008
+ENV LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8 EDITOR=/usr/bin/editor
+USER postgres
+WORKDIR /home/postgres
+CMD ["/bin/bash", "/entrypoint.sh"]

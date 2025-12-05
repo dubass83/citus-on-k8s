@@ -1,0 +1,234 @@
+{{- if .Values.coordinator.enabled }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ .Values.clusterName }}-{{ .Values.coordinator.citusGroup }}
+  labels:
+    {{- include "citus-cluster.coordinatorLabels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.coordinator.replicas }}
+  serviceName: {{ .Values.clusterName }}-{{ .Values.coordinator.citusGroup }}-config
+  selector:
+    matchLabels:
+      {{- include "citus-cluster.coordinatorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "citus-cluster.coordinatorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "citus-cluster.serviceAccountName" . }}
+      {{- if .Values.initContainer.enabled }}
+      initContainers:
+      - name: fix-permissions
+        image: busybox:latest
+        command:
+        - sh
+        - -c
+        - |
+          chown -R {{ .Values.initContainer.userId }}:{{ .Values.initContainer.groupId }} {{ .Values.initContainer.pgdataDir }}
+          chmod 0700 {{ .Values.initContainer.pgdataDir }}
+        {{- if .Values.ssl.enabled }}
+          # Copy SSL certs and fix permissions
+          cp /tmp/ssl-source/* /etc/ssl/certs/postgresql/
+          chown -R {{ .Values.initContainer.userId }}:{{ .Values.initContainer.groupId }} /etc/ssl/certs/postgresql
+          chmod 0600 /etc/ssl/certs/postgresql/*.key
+          chmod 0644 /etc/ssl/certs/postgresql/*.crt
+        {{- end }}
+        volumeMounts:
+        - name: pgdata
+          mountPath: {{ .Values.initContainer.pgdataDir }}
+        {{- if .Values.ssl.enabled }}
+        - mountPath: /etc/ssl/certs/postgresql
+          name: ssl-certs-writable
+        - mountPath: /tmp/ssl-source
+          name: ssl-certs
+          readOnly: true
+        {{- end }}
+        securityContext:
+          runAsUser: 0  # Run as root to change ownership
+      {{- end }}
+      containers:
+        - name: {{ .Values.clusterName }}-{{ .Values.coordinator.citusGroup }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          resources:
+            {{- toYaml .Values.coordinator.resources | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          ports:
+            - containerPort: {{ .Values.ports.restapi }}
+              protocol: TCP
+            - containerPort: {{ .Values.ports.postgresql }}
+              protocol: TCP
+          volumeMounts:
+            - mountPath: /home/postgres/pgdata
+              name: pgdata
+            {{- if .Values.ssl.enabled }}
+            - mountPath: /etc/ssl/certs/postgresql
+              name: ssl-certs-writable
+              readOnly: true
+            {{- end }}
+          env:
+            - name: PATRONI_KUBERNETES_POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: PATRONI_KUBERNETES_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: PATRONI_KUBERNETES_BYPASS_API_SERVICE
+              value: {{ .Values.patroni.kubernetes.bypassApiService | quote }}
+            - name: PATRONI_KUBERNETES_USE_ENDPOINTS
+              value: {{ .Values.patroni.kubernetes.useEndpoints | quote }}
+            - name: PATRONI_KUBERNETES_LABELS
+              value: {{ include "citus-cluster.patroniKubernetesLabels" . | quote }}
+            - name: PATRONI_CITUS_DATABASE
+              value: {{ .Values.patroni.database }}
+            - name: PATRONI_CITUS_GROUP
+              value: {{ .Values.coordinator.citusGroup | quote }}
+            - name: PATRONI_SUPERUSER_USERNAME
+              value: {{ .Values.patroni.superuser.username }}
+            - name: PATRONI_SUPERUSER_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secret.name }}
+                  key: {{ .Values.secret.keys.superuserPassword }}
+            - name: PATRONI_REPLICATION_USERNAME
+              value: {{ .Values.patroni.replication.username }}
+            - name: PATRONI_REPLICATION_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secret.name }}
+                  key: {{ .Values.secret.keys.replicationPassword }}
+            - name: PATRONI_SCOPE
+              value: {{ .Values.patroni.scope }}
+            - name: PATRONI_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: PATRONI_POSTGRESQL_DATA_DIR
+              value: {{ .Values.patroni.postgresql.dataDir }}
+            - name: PATRONI_POSTGRESQL_PGPASS
+              value: {{ .Values.patroni.postgresql.pgpass }}
+            - name: PATRONI_POSTGRESQL_LISTEN
+              value: {{ .Values.patroni.postgresql.listen }}
+            - name: PATRONI_RESTAPI_LISTEN
+              value: {{ .Values.patroni.restapi.listen }}
+            {{- if .Values.ssl.enabled }}
+            - name: PGSSLMODE
+              value: {{ .Values.ssl.mode }}
+            - name: PGSSLROOTCERT
+              value: /etc/ssl/certs/postgresql/ca.crt
+            - name: PGSSLCERT
+              value: /etc/ssl/certs/postgresql/server.crt
+            - name: PGSSLKEY
+              value: /etc/ssl/certs/postgresql/server.key
+            {{- end }}
+            # PostgreSQL configuration parameters
+            {{- if .Values.patroni.postgresql.parameters }}
+            - name: PATRONI_POSTGRESQL_MAX_CONNECTIONS
+              value: {{ .Values.patroni.postgresql.parameters.max_connections | quote }}
+            - name: PATRONI_POSTGRESQL_MAX_LOCKS_PER_TRANSACTION
+              value: {{ .Values.patroni.postgresql.parameters.max_locks_per_transaction | quote }}
+            - name: PATRONI_POSTGRESQL_SHARED_BUFFERS
+              value: {{ .Values.patroni.postgresql.parameters.shared_buffers | quote }}
+            - name: PATRONI_POSTGRESQL_WORK_MEM
+              value: {{ .Values.patroni.postgresql.parameters.work_mem | quote }}
+            - name: PATRONI_POSTGRESQL_MAINTENANCE_WORK_MEM
+              value: {{ .Values.patroni.postgresql.parameters.maintenance_work_mem | quote }}
+            - name: PATRONI_POSTGRESQL_EFFECTIVE_CACHE_SIZE
+              value: {{ .Values.patroni.postgresql.parameters.effective_cache_size | quote }}
+            - name: PATRONI_POSTGRESQL_WAL_BUFFERS
+              value: {{ .Values.patroni.postgresql.parameters.wal_buffers | quote }}
+            - name: PATRONI_POSTGRESQL_CHECKPOINT_COMPLETION_TARGET
+              value: {{ .Values.patroni.postgresql.parameters.checkpoint_completion_target | quote }}
+            - name: PATRONI_POSTGRESQL_RANDOM_PAGE_COST
+              value: {{ .Values.patroni.postgresql.parameters.random_page_cost | quote }}
+            - name: PATRONI_POSTGRESQL_SHARED_PRELOAD_LIBRARIES
+              value: {{ .Values.patroni.postgresql.parameters.shared_preload_libraries | quote }}
+            {{- end }}
+        {{- if and .Values.monitoring.enabled .Values.monitoring.postgresExporter.enabled }}
+        - name: postgres-exporter
+          image: "{{ .Values.monitoring.postgresExporter.image.repository }}:{{ .Values.monitoring.postgresExporter.image.tag }}"
+          imagePullPolicy: {{ .Values.monitoring.postgresExporter.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.monitoring.postgresExporter.port }}
+              name: metrics
+              protocol: TCP
+          env:
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secret.name }}
+                  key: {{ .Values.secret.keys.superuserPassword }}
+            # Connection string for postgres_exporter
+            # Use DATA_SOURCE_USER and DATA_SOURCE_PASS instead of embedding password in URL
+            - name: DATA_SOURCE_URI
+              value: "127.0.0.1:{{ .Values.ports.postgresql }}/{{ .Values.patroni.database }}?sslmode=disable"
+            - name: DATA_SOURCE_USER
+              value: "{{ .Values.patroni.superuser.username }}"
+            - name: DATA_SOURCE_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secret.name }}
+                  key: {{ .Values.secret.keys.superuserPassword }}
+            # Disable default metrics to reduce noise
+            - name: PG_EXPORTER_DISABLE_DEFAULT_METRICS
+              value: "false"
+            # Disable settings metrics (may contain sensitive info)
+            - name: PG_EXPORTER_DISABLE_SETTINGS_METRICS
+              value: "false"
+            {{- if .Values.monitoring.postgresExporter.customQueries.enabled }}
+            # Custom queries file path
+            - name: PG_EXPORTER_EXTEND_QUERY_PATH
+              value: "/etc/postgres-exporter/queries.yaml"
+            {{- end }}
+          {{- if .Values.monitoring.postgresExporter.customQueries.enabled }}
+          volumeMounts:
+            - name: exporter-queries
+              mountPath: /etc/postgres-exporter
+              readOnly: true
+          {{- end }}
+          resources:
+            {{- toYaml .Values.monitoring.postgresExporter.resources | nindent 12 }}
+        {{- end }}
+      terminationGracePeriodSeconds: {{ .Values.podSpec.terminationGracePeriodSeconds }}
+      volumes:
+        - name: pgdata
+          {{- if .Values.storage.persistentVolume.enabled }}
+          persistentVolumeClaim:
+            claimName: pgdata
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        {{- if .Values.ssl.enabled }}
+        - name: ssl-certs
+          secret:
+            secretName: {{ .Values.ssl.secretName }}
+        - name: ssl-certs-writable  # EmptyDir for writable copies
+          emptyDir: {}
+        {{- end }}
+        {{- if and .Values.monitoring.enabled .Values.monitoring.postgresExporter.enabled .Values.monitoring.postgresExporter.customQueries.enabled }}
+        - name: exporter-queries
+          configMap:
+            name: {{ default (printf "%s-exporter-queries" .Values.clusterName) .Values.monitoring.postgresExporter.customQueries.configMapName }}
+        {{- end }}
+  {{- if .Values.storage.persistentVolume.enabled }}
+  volumeClaimTemplates:
+  - metadata:
+      name: pgdata
+      labels:
+        {{- include "citus-cluster.coordinatorLabels" . | nindent 8 }}
+      {{- if .Values.storage.persistentVolume.storageClass }}
+      annotations:
+        volume.alpha.kubernetes.io/storage-class: {{ .Values.storage.persistentVolume.storageClass }}
+      {{- end }}
+    spec:
+      accessModes:
+        {{- toYaml .Values.storage.persistentVolume.accessModes | nindent 8 }}
+      resources:
+        requests:
+          storage: {{ .Values.storage.persistentVolume.size }}
+  {{- end }}
+{{- end }}

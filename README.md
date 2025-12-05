@@ -103,24 +103,7 @@ The cluster consists of:
 
 ## Deployment Options
 
-### Option 1: Direct Kubernetes Deployment
-
-Use the standalone `citus_k8s.yaml` file for simple deployments:
-
-    postgres@citusdemo-0-0:~$ psql citus
-    psql (16.4 (Debian 16.4-1.pgdg120+1))
-    Type "help" for help.
-
-```bash
-# Build and load the image
-docker build -f Dockerfile.citus -t patroni-citus-k8s .
-kind load docker-image patroni-citus-k8s
-
-# Deploy the cluster
-kubectl apply -f citus_k8s.yaml
-```
-
-### Option 2: Helm Chart Deployment (Recommended)
+### Option 1: Helm Chart Deployment (Recommended)
 
 Use the Helm chart for more flexible configuration:
 
@@ -447,4 +430,4 @@ Contributions are welcome! Please ensure:
 
 ## License
 
-[Add your license information here]
+[MIT License]

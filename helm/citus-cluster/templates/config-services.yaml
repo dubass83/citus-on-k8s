@@ -1,0 +1,48 @@
+{{- if .Values.coordinator.enabled }}
+# Headless service for coordinator DNS and Patroni DCS endpoints
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.clusterName }}-{{ .Values.coordinator.citusGroup }}-config
+  labels:
+    {{- include "citus-cluster.coordinatorLabels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  ipFamilyPolicy: SingleStack
+  ipFamilies:
+  - IPv4
+  selector:
+    {{- include "citus-cluster.coordinatorLabels" . | nindent 4 }}
+  ports:
+  - name: postgresql
+    port: {{ .Values.ports.postgresql }}
+    targetPort: {{ .Values.ports.postgresql }}
+{{- end }}
+---
+{{- range $worker := .Values.workers }}
+# Headless service for worker-{{ $worker.citusGroup }} DNS and Patroni DCS endpoints
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $.Values.clusterName }}-{{ $worker.citusGroup }}-config
+  labels:
+    application: {{ $.Values.application }}
+    cluster-name: {{ $.Values.clusterName }}
+    citus-group: {{ $worker.citusGroup | quote }}
+    citus-type: {{ $worker.citusType }}
+spec:
+  clusterIP: None
+  ipFamilyPolicy: SingleStack
+  ipFamilies:
+  - IPv4
+  selector:
+    application: {{ $.Values.application }}
+    cluster-name: {{ $.Values.clusterName }}
+    citus-group: {{ $worker.citusGroup | quote }}
+    citus-type: {{ $worker.citusType }}
+  ports:
+  - name: postgresql
+    port: {{ $.Values.ports.postgresql }}
+    targetPort: {{ $.Values.ports.postgresql }}
+---
+{{- end }}

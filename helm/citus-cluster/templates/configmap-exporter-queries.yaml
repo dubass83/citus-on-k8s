@@ -1,0 +1,315 @@
+{{- if and .Values.monitoring.enabled .Values.monitoring.postgresExporter.enabled .Values.monitoring.postgresExporter.customQueries.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ default (printf "%s-exporter-queries" .Values.clusterName) .Values.monitoring.postgresExporter.customQueries.configMapName }}
+  labels:
+    {{- include "citus-cluster.labels" . | nindent 4 }}
+data:
+  queries.yaml: |
+    # Custom queries for Citus-specific metrics
+    # These queries extend the default postgres_exporter metrics
+    # All queries are designed to work on both primary and replica nodes
+    # NOTE: These queries assume Citus extension is installed in the database
+    # Use PG_EXPORTER_EXCLUDE_DATABASES to exclude databases without Citus
+
+    # Citus worker nodes status
+    # Safe on replicas: Only reads from pg_dist_node catalog
+    citus_worker_nodes:
+      query: |
+        SELECT
+          nodename,
+          nodeport,
+          groupid,
+          noderole,
+          CASE WHEN noderole = 'primary' THEN 1 ELSE 0 END as is_primary,
+          CASE WHEN isactive THEN 1 ELSE 0 END as is_active
+        FROM pg_dist_node
+        WHERE groupid > 0
+      metrics:
+        - nodename:
+            usage: "LABEL"
+            description: "Worker node hostname"
+        - nodeport:
+            usage: "LABEL"
+            description: "Worker node port"
+        - groupid:
+            usage: "LABEL"
+            description: "Citus group ID"
+        - noderole:
+            usage: "LABEL"
+            description: "Node role (primary or secondary)"
+        - is_primary:
+            usage: "GAUGE"
+            description: "1 if node is primary, 0 otherwise"
+        - is_active:
+            usage: "GAUGE"
+            description: "1 if node is active, 0 otherwise"
+
+    # Citus distributed tables count
+    # Safe on replicas: Only reads from pg_dist_partition catalog
+    citus_distributed_tables:
+      query: |
+        SELECT
+          COUNT(*) as distributed_table_count,
+          SUM(CASE WHEN partmethod = 'h' THEN 1 ELSE 0 END) as hash_distributed_count,
+          SUM(CASE WHEN partmethod = 'n' THEN 1 ELSE 0 END) as reference_table_count
+        FROM pg_dist_partition
+      metrics:
+        - distributed_table_count:
+            usage: "GAUGE"
+            description: "Total number of distributed tables"
+        - hash_distributed_count:
+            usage: "GAUGE"
+            description: "Number of hash-distributed tables"
+        - reference_table_count:
+            usage: "GAUGE"
+            description: "Number of reference tables"
+
+    # Citus shard placement statistics
+    # Safe on replicas: Only reads from catalog tables
+    citus_shard_placements:
+      query: |
+        SELECT
+          p.groupid,
+          COUNT(*) as shard_count,
+          SUM(CASE WHEN shardstate = 1 THEN 1 ELSE 0 END) as active_shards,
+          SUM(CASE WHEN shardstate = 3 THEN 1 ELSE 0 END) as inactive_shards,
+          SUM(CASE WHEN shardstate = 4 THEN 1 ELSE 0 END) as to_delete_shards
+        FROM pg_dist_placement p
+        JOIN pg_dist_node n ON p.groupid = n.groupid
+        WHERE n.noderole = 'primary'
+        GROUP BY p.groupid
+      metrics:
+        - groupid:
+            usage: "LABEL"
+            description: "Citus group ID"
+        - shard_count:
+            usage: "GAUGE"
+            description: "Total number of shards on this worker group"
+        - active_shards:
+            usage: "GAUGE"
+            description: "Number of active shards (state=1)"
+        - inactive_shards:
+            usage: "GAUGE"
+            description: "Number of inactive shards (state=3)"
+        - to_delete_shards:
+            usage: "GAUGE"
+            description: "Number of shards to delete (state=4)"
+
+    # Citus connection counts per worker
+    # Safe on all databases: pg_stat_activity is always available
+    citus_worker_connections:
+      query: |
+        SELECT
+          backend_type,
+          COUNT(*) as connection_count
+        FROM pg_stat_activity
+        WHERE backend_type IN ('client backend', 'background worker', 'logical replication worker')
+        GROUP BY backend_type
+      metrics:
+        - backend_type:
+            usage: "LABEL"
+            description: "Type of backend connection"
+        - connection_count:
+            usage: "GAUGE"
+            description: "Number of connections by type"
+
+    # Citus distributed query statistics (only on coordinator with pg_stat_statements)
+    # Gracefully returns zeros if pg_stat_statements is not available
+    citus_distributed_queries:
+      query: |
+        SELECT
+          total_distributed_queries,
+          avg_execution_time_ms,
+          max_execution_time_ms
+        FROM (
+          SELECT
+            COALESCE(SUM(calls), 0) as total_distributed_queries,
+            COALESCE(AVG(mean_exec_time), 0) as avg_execution_time_ms,
+            COALESCE(MAX(max_exec_time), 0) as max_execution_time_ms
+          FROM pg_stat_statements
+          WHERE query LIKE '%SELECT%FROM%'
+            AND query NOT LIKE '%pg_stat%'
+            AND query NOT LIKE '%pg_catalog%'
+          HAVING COUNT(*) > 0
+
+          UNION ALL
+
+          SELECT 0, 0, 0
+          WHERE NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements')
+            OR NOT EXISTS (SELECT 1 FROM pg_stat_statements LIMIT 1)
+        ) as stats
+        LIMIT 1
+      metrics:
+        - total_distributed_queries:
+            usage: "COUNTER"
+            description: "Total number of distributed queries executed"
+        - avg_execution_time_ms:
+            usage: "GAUGE"
+            description: "Average execution time of distributed queries in milliseconds"
+        - max_execution_time_ms:
+            usage: "GAUGE"
+            description: "Maximum execution time of distributed queries in milliseconds"
+
+    # Replication lag per node (for HA monitoring)
+    # FIXED: Now completely safe on replicas
+    # - On primary: Shows replication status for all replicas
+    # - On replica: Returns dummy row with 'replica' label to indicate standby mode
+    citus_replication_lag:
+      query: |
+        SELECT
+          application_name,
+          client_addr,
+          state,
+          lag_seconds,
+          lag_bytes
+        FROM (
+          SELECT
+            COALESCE(application_name, 'none') as application_name,
+            COALESCE(client_addr::text, '0.0.0.0') as client_addr,
+            COALESCE(state, 'none') as state,
+            COALESCE(EXTRACT(EPOCH FROM (now() - pg_last_xact_replay_timestamp())), 0) as lag_seconds,
+            COALESCE(pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn), 0) as lag_bytes
+          FROM pg_stat_replication
+          WHERE NOT pg_is_in_recovery()
+
+          UNION ALL
+
+          SELECT
+            'replica' as application_name,
+            '0.0.0.0' as client_addr,
+            'standby' as state,
+            COALESCE(EXTRACT(EPOCH FROM (now() - pg_last_xact_replay_timestamp())), 0) as lag_seconds,
+            0 as lag_bytes
+          WHERE pg_is_in_recovery()
+
+          UNION ALL
+
+          SELECT
+            'none' as application_name,
+            '0.0.0.0' as client_addr,
+            'none' as state,
+            0 as lag_seconds,
+            0 as lag_bytes
+          WHERE NOT pg_is_in_recovery()
+            AND NOT EXISTS (SELECT 1 FROM pg_stat_replication)
+        ) as replication_status
+      metrics:
+        - application_name:
+            usage: "LABEL"
+            description: "Name of the replication application (or 'replica' if this is a standby node)"
+        - client_addr:
+            usage: "LABEL"
+            description: "IP address of the replica"
+        - state:
+            usage: "LABEL"
+            description: "Replication state (streaming, catchup, standby for replicas, none for primary without replicas)"
+        - lag_seconds:
+            usage: "GAUGE"
+            description: "Replication lag in seconds"
+        - lag_bytes:
+            usage: "GAUGE"
+            description: "Replication lag in bytes (0 on replicas)"
+
+    # Table size statistics for distributed tables
+    # Safe on all databases: pg_tables and size functions are always available
+    citus_table_sizes:
+      query: |
+        SELECT
+          schemaname || '.' || tablename as table_name,
+          pg_total_relation_size(schemaname || '.' || tablename) as total_bytes,
+          pg_table_size(schemaname || '.' || tablename) as table_bytes,
+          pg_indexes_size(schemaname || '.' || tablename) as indexes_bytes
+        FROM pg_tables
+        WHERE schemaname NOT IN ('pg_catalog', 'information_schema', 'citus', 'columnar')
+        ORDER BY pg_total_relation_size(schemaname || '.' || tablename) DESC
+        LIMIT 10
+      metrics:
+        - table_name:
+            usage: "LABEL"
+            description: "Fully qualified table name"
+        - total_bytes:
+            usage: "GAUGE"
+            description: "Total size of table including indexes and TOAST"
+        - table_bytes:
+            usage: "GAUGE"
+            description: "Size of table data only"
+        - indexes_bytes:
+            usage: "GAUGE"
+            description: "Size of table indexes"
+
+    # Citus metadata tables health check
+    # Safe on replicas: Only reads from catalog
+    citus_metadata_sync:
+      query: |
+        SELECT
+          COUNT(*) as node_count,
+          SUM(CASE WHEN hasmetadata THEN 1 ELSE 0 END) as nodes_with_metadata,
+          SUM(CASE WHEN metadatasynced THEN 1 ELSE 0 END) as nodes_metadata_synced
+        FROM pg_dist_node
+        WHERE groupid > 0 AND noderole = 'primary'
+      metrics:
+        - node_count:
+            usage: "GAUGE"
+            description: "Total number of worker nodes"
+        - nodes_with_metadata:
+            usage: "GAUGE"
+            description: "Number of nodes with metadata"
+        - nodes_metadata_synced:
+            usage: "GAUGE"
+            description: "Number of nodes with synchronized metadata"
+
+    # Replication slots status (PRIMARY ONLY)
+    # This query explicitly runs ONLY on primary nodes to avoid "recovery is in progress" errors
+    # On replicas, it returns a dummy row to keep prometheus_exporter happy
+    pg_replication_slots:
+      query: |
+        SELECT
+          slot_name,
+          slot_type,
+          database,
+          active,
+          lag_bytes
+        FROM (
+          SELECT
+            slot_name,
+            slot_type,
+            database,
+            active,
+            CASE
+              WHEN active THEN pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)
+              ELSE 0
+            END as lag_bytes
+          FROM pg_replication_slots
+          WHERE NOT pg_is_in_recovery()
+
+          UNION ALL
+
+          SELECT
+            'none' as slot_name,
+            'physical' as slot_type,
+            'none' as database,
+            false as active,
+            0 as lag_bytes
+          WHERE pg_is_in_recovery() OR NOT EXISTS (
+            SELECT 1 FROM pg_replication_slots WHERE NOT pg_is_in_recovery()
+          )
+        ) as slots_status
+      metrics:
+        - slot_name:
+            usage: "LABEL"
+            description: "Name of the replication slot"
+        - slot_type:
+            usage: "LABEL"
+            description: "Type of replication slot (physical or logical)"
+        - database:
+            usage: "LABEL"
+            description: "Database name for logical slots"
+        - active:
+            usage: "GAUGE"
+            description: "1 if slot is active, 0 otherwise"
+        - lag_bytes:
+            usage: "GAUGE"
+            description: "Replication slot lag in bytes (0 on replicas or inactive slots)"
+{{- end }}

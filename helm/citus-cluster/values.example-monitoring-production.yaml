@@ -1,0 +1,309 @@
+# Example: Production Monitoring Setup
+#
+# This is a complete production-ready configuration with:
+#   - Full monitoring stack with ServiceMonitor
+#   - SSL/TLS enabled
+#   - Persistent volumes
+#   - Optimized PostgreSQL parameters
+#   - Resource limits
+#   - Multiple worker groups
+#
+# Use case:
+#   - Production environments
+#   - High availability requirements
+#   - Security hardening
+#   - Performance optimization
+#
+# Prerequisites:
+#   - Prometheus Operator installed
+#   - SSL certificates created (see scripts/generate-ssl-certs.sh)
+#   - Adequate cluster resources
+#
+# Deploy with:
+#   # 1. Generate SSL certificates
+#   ./scripts/generate-ssl-certs.sh
+#
+#   # 2. Create SSL secret
+#   kubectl create secret generic citusdemo-ssl-certs \
+#     --from-file=ca.crt=certs/ca.crt \
+#     --from-file=server.crt=certs/server.crt \
+#     --from-file=server.key=certs/server.key
+#
+#   # 3. Deploy cluster
+#   helm install citusdemo ./helm/citus-cluster -f values.example-monitoring-production.yaml
+
+clusterName: citusdemo
+application: patroni
+
+# Docker image
+image:
+  repository: patroni-citus-k8s
+  tag: "1.4.2"  # Use specific version tag in production
+  pullPolicy: IfNotPresent
+
+# Coordinator configuration - 3 replicas for HA
+coordinator:
+  enabled: true
+  citusGroup: "0"
+  replicas: 3
+
+# Worker groups - 3 groups with 2 replicas each
+workers:
+  - citusGroup: "1"
+    citusType: worker
+    replicas: 2
+  - citusGroup: "2"
+    citusType: worker
+    replicas: 2
+  - citusGroup: "3"
+    citusType: worker
+    replicas: 2
+
+# Secret configuration
+secret:
+  create: true
+  name: citusdemo
+
+# Monitoring configuration - PRODUCTION
+monitoring:
+  # Enable full monitoring stack
+  enabled: true
+
+  # postgres_exporter with production settings
+  postgresExporter:
+    enabled: true
+    image:
+      repository: quay.io/prometheuscommunity/postgres-exporter
+      tag: v0.15.0
+      pullPolicy: IfNotPresent
+    port: 9187
+    # Production resource limits
+    resources:
+      requests:
+        cpu: 150m
+        memory: 192Mi
+      limits:
+        cpu: 300m
+        memory: 384Mi
+    # Enable custom Citus queries
+    customQueries:
+      enabled: true
+
+  # ServiceMonitor for Prometheus Operator
+  serviceMonitor:
+    enabled: true
+    namespace: ""
+    interval: 15s
+    scrapeTimeout: 10s
+    labels:
+      env: production
+      team: data-platform
+    additionalLabels:
+      prometheus: kube-prometheus
+
+  # PodMonitor disabled
+  podMonitor:
+    enabled: false
+
+  # Grafana dashboards with automatic import
+  grafanaDashboards:
+    enabled: true
+    namespace: ""
+    labels:
+      grafana_dashboard: "1"
+      env: production
+    dashboards:
+      patroni: true
+      postgresql: true
+      citus: true
+
+# Patroni configuration
+patroni:
+  scope: citusdemo
+  database: citus
+  superuser:
+    username: postgres
+    password: CHANGE_ME_IN_PRODUCTION  # Use strong password or existing secret
+  replication:
+    username: standby
+    password: CHANGE_ME_IN_PRODUCTION  # Use strong password or existing secret
+  kubernetes:
+    bypassApiService: "true"
+    useEndpoints: "true"
+  # Production PostgreSQL parameters
+  postgresql:
+    dataDir: /home/postgres/pgdata/pgroot/data
+    pgpass: /tmp/pgpass
+    listen: "0.0.0.0:5432"
+    parameters:
+      # Connection Settings
+      max_connections: 300  # Increased for production workload
+
+      # Memory Settings (adjust based on available RAM)
+      shared_buffers: 2GB          # 25% of RAM for dedicated DB server
+      work_mem: 32MB               # Per-operation memory
+      maintenance_work_mem: 512MB  # For VACUUM, CREATE INDEX
+      effective_cache_size: 6GB    # Estimate of OS cache
+      wal_buffers: 16MB
+
+      # Locking
+      max_locks_per_transaction: 1024  # Increased for distributed operations
+
+      # Query Planner
+      random_page_cost: 1.1  # SSD storage
+      checkpoint_completion_target: 0.9
+
+      # WAL and Checkpoints (tuned for performance)
+      max_wal_size: 4GB
+      min_wal_size: 1GB
+      checkpoint_timeout: 15min
+
+      # Extensions
+      shared_preload_libraries: "pg_partman_bgw,pg_stat_statements,auto_explain"
+
+      # Logging (adjust for production needs)
+      log_min_duration_statement: 1000  # Log queries > 1s
+      log_checkpoints: "on"
+      log_connections: "on"
+      log_disconnections: "on"
+      log_lock_waits: "on"
+
+      # Auto VACUUM tuning
+      autovacuum_max_workers: 4
+      autovacuum_naptime: 30s
+  restapi:
+    listen: "0.0.0.0:8008"
+
+# Service configuration
+service:
+  type: ClusterIP
+  port: 5432
+  targetPort: 5432
+
+# Probes configuration
+readinessProbe:
+  httpGet:
+    scheme: HTTP
+    path: /readiness
+    port: 8008
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 5
+  successThreshold: 1
+  failureThreshold: 3
+
+# Ports configuration
+ports:
+  restapi: 8008
+  postgresql: 5432
+
+# Storage - PERSISTENT VOLUMES for production
+storage:
+  persistentVolume:
+    enabled: true
+    storageClass: ""  # Use default or specify: "fast-ssd"
+    size: 50Gi        # Adjust based on data size
+    accessModes:
+      - ReadWriteOnce
+
+# Pod configuration
+podSpec:
+  terminationGracePeriodSeconds: 30  # Allow time for graceful shutdown
+
+# Init container configuration
+initContainer:
+  enabled: true
+  userId: 999
+  groupId: 999
+  pgdataDir: /home/postgres/pgdata
+
+# ServiceAccount
+serviceAccount:
+  create: true
+  name: citusdemo
+
+# RBAC
+rbac:
+  create: true
+  createClusterRole: true
+
+# Namespace
+namespace: default
+
+# SSL/TLS configuration - ENABLED for production
+ssl:
+  enabled: true
+  # Use verify-ca for production (requires valid certificates)
+  mode: verify-ca
+  secretName: citusdemo-ssl-certs
+  createSecret: false  # Use pre-created secret
+
+# Additional extensions for production
+additionalExtensions:
+  enabled: true
+  maxAttempts: 60
+  retryDelaySeconds: 5
+  backoffLimit: 3
+  enableOnWorkers: false
+  extensions:
+    - postgis
+    - postgis_topology
+    - pg_partman
+    - pg_stat_statements
+
+# Additional databases (example for multi-tenant setup)
+additionalDatabases:
+  - name: analytics
+    owner: postgres
+    extensions:
+      - postgis
+      - pg_partman
+      - pg_stat_statements
+    parameters:
+      pg_partman_bgw.dbname: "analytics"
+      timezone: "UTC"
+    initSQL: |
+      -- Create schemas
+      CREATE SCHEMA IF NOT EXISTS events;
+      CREATE SCHEMA IF NOT EXISTS metrics;
+
+      -- Create distributed tables
+      CREATE TABLE events.user_actions (
+        event_id BIGSERIAL,
+        user_id BIGINT NOT NULL,
+        action_type VARCHAR(50),
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        PRIMARY KEY (event_id, user_id)
+      );
+      SELECT create_distributed_table('events.user_actions', 'user_id');
+
+      -- Create reference table
+      CREATE TABLE events.action_types (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(50) UNIQUE,
+        description TEXT
+      );
+      SELECT create_reference_table('events.action_types');
+
+# Production Deployment Checklist:
+#
+# [ ] Update passwords in patroni.superuser and patroni.replication
+# [ ] Generate and deploy SSL certificates
+# [ ] Verify storage class exists and has adequate IOPS
+# [ ] Adjust PostgreSQL parameters based on server specs
+# [ ] Configure backup solution (not included in this chart)
+# [ ] Set up alerting rules in Prometheus
+# [ ] Configure Grafana notification channels
+# [ ] Review and adjust resource requests/limits
+# [ ] Enable network policies if required
+# [ ] Configure pod disruption budgets
+# [ ] Set up monitoring dashboards
+# [ ] Test failover scenarios
+# [ ] Document runbooks for common issues
+#
+# Post-Deployment Verification:
+#   kubectl get pods -l cluster-name=citusdemo
+#   kubectl get pvc -l cluster-name=citusdemo
+#   kubectl get servicemonitor -l cluster-name=citusdemo
+#   kubectl exec -it citusdemo-0-0 -- patronictl list
+#   kubectl exec -it citusdemo-0-0 -- psql -U postgres -d citus -c "SELECT * FROM citus_get_active_worker_nodes();"

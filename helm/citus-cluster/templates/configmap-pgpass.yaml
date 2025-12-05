@@ -1,0 +1,34 @@
+{{- if .Values.pgpass.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "citus-cluster.fullname" . }}-pgpass
+  labels:
+    {{- include "citus-cluster.labels" . | nindent 4 }}
+data:
+  pgpass: |
+    # .pgpass file for Citus inter-node authentication
+    # Format: hostname:port:database:username:password
+    # This file is mounted read-only and copied to ~/.pgpass by init container
+
+    {{- if .Values.pgpass.entries }}
+    # Custom entries
+    {{- range .Values.pgpass.entries }}
+    {{ .host }}:{{ default 5432 .port }}:{{ default "*" .database }}:{{ default "postgres" .username }}:${POSTGRES_PASSWORD}
+    {{- end }}
+    {{- end }}
+
+    # Auto-generated entries for worker services
+    {{- range .Values.workers }}
+    {{ $.Values.clusterName }}-{{ .citusGroup }}:{{ $.Values.ports.postgresql }}:*:postgres:${POSTGRES_PASSWORD}
+    {{- end }}
+
+    # Wildcard entry for any host (covers IP addresses from pg_dist_node)
+    # This allows citus_add_node() to authenticate when using IPs from coordinator metadata
+    *:{{ $.Values.ports.postgresql }}:*:postgres:${POSTGRES_PASSWORD}
+
+    {{- if .Values.pgpass.includeWorkerIPs }}
+    # Note: IP-based entries will be added dynamically by init container
+    # as IPs are not known at ConfigMap creation time
+    {{- end }}
+{{- end }}

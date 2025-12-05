@@ -1,0 +1,201 @@
+# Example Helm values demonstrating automated database setup
+# This configuration shows how to use the automated post-deployment initialization
+# to create multiple databases with full Citus distribution and SSL certificate authentication.
+#
+# Usage:
+#   helm install citusdemo ./helm/citus-cluster -f values.example-automated-setup.yaml
+
+clusterName: citusdemo
+
+# Enable SSL/TLS with certificate authentication
+ssl:
+  enabled: true
+  mode: verify-ca  # Production-grade: verify CA certificate
+  secretName: citusdemo-ssl-certs
+
+# Coordinator configuration
+coordinator:
+  enabled: true
+  citusGroup: "0"
+  replicas: 3
+
+# Worker groups configuration
+workers:
+  - citusGroup: "1"
+    replicas: 2
+  - citusGroup: "2"
+    replicas: 2
+
+# Storage configuration (recommended for production)
+storage:
+  persistentVolume:
+    enabled: true
+    storageClass: ""  # Use default storage class
+    size: 10Gi
+
+# Enable .pgpass for password-based authentication fallback
+# (Optional: only needed if not using certificate-only authentication)
+pgpass:
+  enabled: false
+
+# Enable additional extensions on the default 'citus' database
+additionalExtensions:
+  enabled: true
+  extensions:
+    - postgis
+    - postgis_topology
+    - pg_partman
+
+# Automated database creation with full distributed setup
+# The Helm chart will automatically:
+#   1. Wait for all Patroni groups to be ready
+#   2. Create each database on ALL WORKER NODES first (with extensions)
+#   3. Create each database on COORDINATOR (with extensions)
+#   4. Configure pg_dist_authinfo for SSL certificate authentication
+#   5. Register workers in Citus metadata
+#   6. Run custom initialization SQL
+additionalDatabases:
+  # Example 1: Scientific data warehouse with PostGIS
+  - name: skymap
+    owner: postgres
+    maxAttempts: 60
+    retryDelaySeconds: 5
+    backoffLimit: 3
+
+    # Extensions enabled on BOTH workers and coordinator
+    extensions:
+      - postgis
+      - postgis_topology
+      - pg_partman
+
+    # Custom initialization SQL (runs on coordinator only)
+    initSQL: |
+      -- Create schemas for data organization
+      CREATE SCHEMA IF NOT EXISTS raw_data;
+      CREATE SCHEMA IF NOT EXISTS processed_data;
+      CREATE SCHEMA IF NOT EXISTS analytics;
+
+      -- Create application-specific roles
+      CREATE ROLE skymap_app WITH LOGIN PASSWORD 'changeme';
+      CREATE ROLE skymap_readonly WITH LOGIN PASSWORD 'readonly123';
+
+      -- Grant permissions
+      GRANT CONNECT ON DATABASE skymap TO skymap_app, skymap_readonly;
+      GRANT ALL PRIVILEGES ON SCHEMA raw_data, processed_data TO skymap_app;
+      GRANT USAGE ON SCHEMA raw_data, processed_data, analytics TO skymap_readonly;
+
+      -- Create example distributed table
+      CREATE TABLE IF NOT EXISTS raw_data.observations (
+        observation_id BIGSERIAL,
+        object_id TEXT NOT NULL,
+        ra DOUBLE PRECISION NOT NULL,
+        dec DOUBLE PRECISION NOT NULL,
+        magnitude REAL,
+        observation_time TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        location GEOGRAPHY(POINT),
+        PRIMARY KEY (observation_id, object_id)
+      );
+
+      -- Distribute the table by object_id
+      SELECT create_distributed_table('raw_data.observations', 'object_id');
+
+      -- Create reference table for catalog data (replicated to all nodes)
+      CREATE TABLE IF NOT EXISTS processed_data.catalog (
+        object_id TEXT PRIMARY KEY,
+        object_type TEXT,
+        constellation TEXT,
+        spectral_class TEXT
+      );
+      SELECT create_reference_table('processed_data.catalog');
+
+    # Database-level parameter overrides
+    parameters:
+      timezone: "UTC"
+      pg_partman_bgw.dbname: "skymap"
+      search_path: "raw_data,processed_data,public"
+
+  # Example 2: Analytics database (coordinator + worker group 1 only)
+  - name: analytics
+    owner: postgres
+
+    # Only use worker group 1 for this database
+    workerGroups:
+      - "1"
+
+    extensions:
+      - pg_partman
+
+    initSQL: |
+      -- Create time-series partitioned table
+      CREATE TABLE IF NOT EXISTS events (
+        event_id BIGSERIAL,
+        user_id BIGINT NOT NULL,
+        event_type TEXT NOT NULL,
+        event_data JSONB,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (event_id, created_at)
+      ) PARTITION BY RANGE (created_at);
+
+      -- Distribute the partitioned table
+      SELECT create_distributed_table('events', 'user_id');
+
+      -- Create initial partition
+      CREATE TABLE events_default PARTITION OF events DEFAULT;
+
+    parameters:
+      pg_partman_bgw.dbname: "analytics"
+      pg_partman_bgw.interval: "3600"
+      pg_partman_bgw.role: "postgres"
+
+  # Example 3: Simple application database (all workers)
+  - name: appdb
+    owner: postgres
+
+    extensions:
+      - postgis
+
+    initSQL: |
+      -- Create application schema
+      CREATE SCHEMA IF NOT EXISTS app;
+
+      -- Create distributed table for users
+      CREATE TABLE app.users (
+        user_id BIGSERIAL PRIMARY KEY,
+        email TEXT UNIQUE NOT NULL,
+        username TEXT UNIQUE NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      -- Distribute by user_id
+      SELECT create_distributed_table('app.users', 'user_id');
+
+      -- Create distributed table for posts
+      CREATE TABLE app.posts (
+        post_id BIGSERIAL,
+        user_id BIGINT NOT NULL,
+        title TEXT NOT NULL,
+        content TEXT,
+        location GEOGRAPHY(POINT),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (post_id, user_id)
+      );
+
+      -- Distribute by user_id (co-located with users table)
+      SELECT create_distributed_table('app.posts', 'user_id', colocate_with => 'app.users');
+
+# PostgreSQL configuration
+patroni:
+  postgresql:
+    parameters:
+      # Increased for production workload
+      max_connections: 300
+      max_locks_per_transaction: 1024
+
+      # Memory settings (adjust based on available RAM)
+      shared_buffers: 256MB
+      work_mem: 16MB
+      maintenance_work_mem: 128MB
+      effective_cache_size: 1GB
+
+      # Extensions
+      shared_preload_libraries: "pg_partman_bgw"

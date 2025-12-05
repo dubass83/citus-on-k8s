@@ -1,0 +1,160 @@
+{{- if .Values.additionalExtensions.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Values.clusterName }}-extensions-setup
+  labels:
+    {{- include "citus-cluster.labels" . | nindent 4 }}
+    job-type: extensions-setup
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "5"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  backoffLimit: {{ .Values.additionalExtensions.backoffLimit }}
+  template:
+    metadata:
+      labels:
+        {{- include "citus-cluster.labels" . | nindent 8 }}
+        job-type: extensions-setup
+    spec:
+      serviceAccountName: {{ include "citus-cluster.serviceAccountName" . }}
+      restartPolicy: OnFailure
+      {{- if and .Values.initContainer.enabled .Values.ssl.enabled }}
+      initContainers:
+      - name: fix-permissions
+        image: busybox:latest
+        command:
+        - sh
+        - -c
+        - |
+          # Copy SSL certs and fix permissions
+          cp /tmp/ssl-source/* /etc/ssl/certs/postgresql/
+          chown -R {{ .Values.initContainer.userId }}:{{ .Values.initContainer.groupId }} /etc/ssl/certs/postgresql
+          chmod 0600 /etc/ssl/certs/postgresql/*.key
+          chmod 0644 /etc/ssl/certs/postgresql/*.crt
+        volumeMounts:
+        - mountPath: /etc/ssl/certs/postgresql
+          name: ssl-certs-writable
+        - mountPath: /tmp/ssl-source
+          name: ssl-certs
+          readOnly: true
+        securityContext:
+          runAsUser: 0  # Run as root to change ownership
+      {{- end }}
+      containers:
+      - name: extensions-setup
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        command:
+        - /bin/bash
+        - -c
+        - |
+          set -e
+
+          echo "Waiting for PostgreSQL cluster to be ready..."
+          export PGPASSWORD="${POSTGRES_PASSWORD}"
+
+          # Wait for coordinator service to be available
+          MAX_ATTEMPTS={{ .Values.additionalExtensions.maxAttempts }}
+          ATTEMPT=0
+
+          # Try to connect to the coordinator service
+          export COORDINATOR_SERVICE="{{ .Values.clusterName }}-{{ .Values.coordinator.citusGroup }}"
+
+          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+            if psql -h ${COORDINATOR_SERVICE} -p {{ .Values.ports.postgresql }} -U {{ .Values.patroni.superuser.username }} -d {{ .Values.patroni.database }} -c "SELECT 1" > /dev/null 2>&1; then
+              echo "PostgreSQL cluster is ready!"
+              break
+            fi
+            ATTEMPT=$((ATTEMPT + 1))
+            echo "Waiting for PostgreSQL to be ready... (attempt $ATTEMPT/$MAX_ATTEMPTS)"
+            sleep {{ .Values.additionalExtensions.retryDelaySeconds }}
+          done
+
+          if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
+            echo "ERROR: PostgreSQL did not become ready in time."
+            exit 1
+          fi
+
+          echo "Enabling additional PostgreSQL extensions on coordinator..."
+          {{- range .Values.additionalExtensions.extensions }}
+          echo "  - Creating extension: {{ . }}"
+          psql -h ${COORDINATOR_SERVICE} -p {{ $.Values.ports.postgresql }} -U {{ $.Values.patroni.superuser.username }} -d {{ $.Values.patroni.database }} -c "CREATE EXTENSION IF NOT EXISTS {{ . }} CASCADE;" || {
+            echo "ERROR: Failed to create extension {{ . }}"
+            exit 1
+          }
+          {{- end }}
+
+          echo "Extensions enabled successfully on coordinator!"
+
+          {{- if .Values.additionalExtensions.enableOnWorkers }}
+          echo ""
+          echo "Enabling additional extensions on worker nodes..."
+          
+          # Get list of worker nodes from Citus metadata
+          WORKERS=$(psql -h ${COORDINATOR_SERVICE} -p {{ $.Values.ports.postgresql }} \
+                         -U {{ $.Values.patroni.superuser.username }} \
+                         -d {{ $.Values.patroni.database }} \
+                         -t -A -c "SELECT nodename FROM pg_dist_node WHERE noderole = 'primary' AND groupid > 0;")
+          
+          if [ -z "$WORKERS" ]; then
+            echo "WARNING: No worker nodes found in Citus metadata. Skipping worker setup."
+          else
+            for WORKER_HOST in $WORKERS; do
+              echo "  - Configuring worker: ${WORKER_HOST}"
+              
+              # Test connection first
+              if ! psql -h ${WORKER_HOST} -p {{ $.Values.ports.postgresql }} \
+                        -U {{ $.Values.patroni.superuser.username }} \
+                        -d {{ $.Values.patroni.database }} \
+                        -c "SELECT 1" > /dev/null 2>&1; then
+                echo "    WARNING: Cannot connect to ${WORKER_HOST}. Skipping."
+                continue
+              fi
+              
+              {{- range $.Values.additionalExtensions.extensions }}
+              psql -h ${WORKER_HOST} -p {{ $.Values.ports.postgresql }} \
+                   -U {{ $.Values.patroni.superuser.username }} \
+                   -d {{ $.Values.patroni.database }} \
+                   -c "CREATE EXTENSION IF NOT EXISTS {{ . }} CASCADE;" || {
+                echo "    WARNING: Failed to create extension {{ . }} on ${WORKER_HOST}"
+              }
+              {{- end }}
+              
+              echo "    Worker ${WORKER_HOST} configured successfully!"
+            done
+          fi
+          
+          echo "Extensions enabled on workers!"
+          {{- end }}
+
+          echo ""
+          echo "Extensions setup completed successfully!"
+        env:
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.secret.name }}
+              key: {{ .Values.secret.keys.superuserPassword }}
+      {{- if .Values.ssl.enabled }}
+        - name: PGSSLMODE
+          value: {{ .Values.ssl.mode }}
+        - name: PGSSLROOTCERT
+          value: /etc/ssl/certs/postgresql/ca.crt
+        - name: PGSSLCERT
+          value: /etc/ssl/certs/postgresql/server.crt
+        - name: PGSSLKEY
+          value: /etc/ssl/certs/postgresql/server.key
+        volumeMounts:
+          - mountPath: /etc/ssl/certs/postgresql
+            name: ssl-certs-writable
+            readOnly: true
+      volumes:
+        - name: ssl-certs
+          secret:
+            secretName: {{ .Values.ssl.secretName }}
+        - name: ssl-certs-writable  # EmptyDir for writable copies
+          emptyDir: {}
+      {{- end }}
+{{- end }}

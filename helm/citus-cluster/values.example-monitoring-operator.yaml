@@ -1,0 +1,137 @@
+# Example: Prometheus Operator Monitoring Setup
+#
+# This configuration enables full monitoring with Prometheus Operator
+# using ServiceMonitor CRDs for automatic service discovery.
+#
+# Use case:
+#   - Prometheus Operator installed
+#   - Automatic service discovery
+#   - Production environments with kube-prometheus-stack
+#
+# Prerequisites:
+#   - Prometheus Operator CRDs installed
+#   - Know your Prometheus selector labels
+#
+# Deploy with:
+#   helm install citusdemo ./helm/citus-cluster -f values.example-monitoring-operator.yaml
+
+clusterName: citusdemo
+application: patroni
+
+# Docker image
+image:
+  repository: patroni-citus-k8s
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+# Coordinator configuration
+coordinator:
+  enabled: true
+  citusGroup: "0"
+  replicas: 3
+
+# Worker groups
+workers:
+  - citusGroup: "1"
+    replicas: 2
+  - citusGroup: "2"
+    replicas: 2
+
+# Monitoring configuration - PROMETHEUS OPERATOR
+monitoring:
+  # Enable monitoring components
+  enabled: true
+
+  # postgres_exporter configuration
+  postgresExporter:
+    enabled: true
+    image:
+      repository: quay.io/prometheuscommunity/postgres-exporter
+      tag: v0.15.0
+      pullPolicy: IfNotPresent
+    port: 9187
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi
+    # Enable custom Citus queries
+    customQueries:
+      enabled: true
+
+  # ServiceMonitor for Prometheus Operator
+  serviceMonitor:
+    enabled: true
+    # Leave namespace empty to use the same as the chart
+    namespace: ""
+    # Scrape interval
+    interval: 15s
+    scrapeTimeout: 10s
+    # Labels for ServiceMonitor resource
+    labels: {}
+    # Additional labels for Prometheus to select this ServiceMonitor
+    # Adjust 'prometheus' label to match your Prometheus instance
+    additionalLabels:
+      prometheus: kube-prometheus
+      # Or for prometheus-operator helm chart:
+      # release: prometheus-operator
+
+  # PodMonitor disabled (using ServiceMonitor)
+  podMonitor:
+    enabled: false
+
+  # Grafana dashboards with automatic import
+  grafanaDashboards:
+    enabled: true
+    # Leave namespace empty to use the same as the chart
+    namespace: ""
+    # Labels for Grafana sidecar to discover dashboards
+    labels:
+      grafana_dashboard: "1"
+    dashboards:
+      patroni: true
+      postgresql: true
+      citus: true
+
+# Patroni configuration
+patroni:
+  scope: citusdemo
+  database: citus
+  superuser:
+    username: postgres
+    password: zalando
+  replication:
+    username: standby
+    password: rep-pass
+  # PostgreSQL parameters optimized for monitoring
+  postgresql:
+    parameters:
+      max_connections: 200
+      shared_buffers: 256MB
+      work_mem: 16MB
+      # Enable pg_stat_statements for query performance tracking
+      shared_preload_libraries: "pg_partman_bgw,pg_stat_statements"
+
+# Storage - persistent volumes for production
+storage:
+  persistentVolume:
+    enabled: true
+    storageClass: ""  # Use default storage class
+    size: 10Gi
+    accessModes:
+      - ReadWriteOnce
+
+# Verify deployment:
+#   kubectl get servicemonitor -l cluster-name=citusdemo
+#   kubectl get configmap -l grafana_dashboard="1"
+#
+# Check Prometheus targets:
+#   kubectl port-forward -n monitoring svc/prometheus-operated 9090:9090
+#   Open: http://localhost:9090/targets
+#
+# Access Grafana:
+#   kubectl port-forward -n monitoring svc/grafana 3000:3000
+#   Open: http://localhost:3000
+#   Import dashboards: 9628 (PostgreSQL), 18870 (Patroni)
