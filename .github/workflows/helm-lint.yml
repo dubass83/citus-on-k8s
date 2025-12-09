@@ -26,11 +26,11 @@ jobs:
         with:
           version: "v3.13.0"
 
-      - name: Add Helm repos (if needed)
-        run: |
-          # Add any required Helm repositories here
-          # helm repo add bitnami https://charts.bitnami.com/bitnami
-          helm repo update
+      # - name: Add Helm repos (if needed)
+      #   run: |
+      #     # Add any required Helm repositories here
+      #     # helm repo add bitnami https://charts.bitnami.com/bitnami
+      #     helm repo update
 
       - name: Lint Helm chart
         run: |
