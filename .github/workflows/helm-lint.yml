@@ -6,11 +6,11 @@ on:
       - main
       - master
     paths:
-      - 'helm/**'
-      - '.github/workflows/helm-lint.yml'
+      - "helm/**"
+      - ".github/workflows/helm-lint.yml"
   pull_request:
     paths:
-      - 'helm/**'
+      - "helm/**"
 
 jobs:
   lint:
@@ -24,7 +24,7 @@ jobs:
       - name: Set up Helm
         uses: azure/setup-helm@v3
         with:
-          version: 'v3.13.0'
+          version: "v3.13.0"
 
       - name: Add Helm repos (if needed)
         run: |
@@ -58,11 +58,16 @@ jobs:
           helm template test ./helm/citus-cluster \
             --set storage.persistentVolume.enabled=true > /dev/null
 
+      - name: Install Pluto
+        run: |
+          VERSION=5.20.2
+          curl -L "https://github.com/FairwindsOps/pluto/releases/download/v${VERSION}/pluto_${VERSION}_linux_amd64.tar.gz" | tar xz
+          chmod +x pluto
+          sudo mv pluto /usr/local/bin/
+
       - name: Check for deprecated APIs
-        uses: FairwindsOps/pluto@master
-        with:
-          target-versions: "k8s=v1.28.0"
-          directory: helm/citus-cluster
+        run: |
+          pluto detect-helm --directory helm/citus-cluster --target-versions k8s=v1.28.0
 
       - name: Summary
         if: always()
@@ -81,7 +86,7 @@ jobs:
       - name: Set up Helm
         uses: azure/setup-helm@v3
         with:
-          version: 'v3.13.0'
+          version: "v3.13.0"
 
       - name: Create kind cluster
         uses: helm/kind-action@v1.8.0

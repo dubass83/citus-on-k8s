@@ -6,13 +6,13 @@ on:
       - main
       - master
     paths:
-      - 'Dockerfile.citus'
-      - 'entrypoint.sh'
-      - '.github/workflows/docker-build.yml'
+      - "Dockerfile.citus"
+      - "entrypoint.sh"
+      - ".github/workflows/docker-build.yml"
   pull_request:
     paths:
-      - 'Dockerfile.citus'
-      - 'entrypoint.sh'
+      - "Dockerfile.citus"
+      - "entrypoint.sh"
   release:
     types: [published]
 
@@ -66,7 +66,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
 
       - name: Summary
         run: |
