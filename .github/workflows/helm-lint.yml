@@ -67,7 +67,8 @@ jobs:
 
       - name: Check for deprecated APIs
         run: |
-          pluto detect-helm --directory helm/citus-cluster --target-versions k8s=v1.28.0
+          # Template the chart and pipe to pluto for analysis
+          helm template test ./helm/citus-cluster | pluto detect - --target-versions k8s=v1.28.0
 
       - name: Summary
         if: always()
