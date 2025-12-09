@@ -42,10 +42,10 @@ jobs:
         run: |
           helm template test ./helm/citus-cluster > /dev/null
 
-      - name: Template Helm chart (staging values)
+      - name: Template Helm chart (monitoring-production values)
         run: |
           helm template test ./helm/citus-cluster \
-            --values ./helm/citus-cluster/values.stg.yaml > /dev/null
+            --values ./helm/citus-cluster/values.example-monitoring-production.yaml > /dev/null
 
       - name: Template Helm chart (SSL enabled)
         run: |
