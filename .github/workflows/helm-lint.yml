@@ -36,7 +36,7 @@ jobs:
         run: |
           helm lint ./helm/citus-cluster
           helm lint ./helm/citus-cluster --values ./helm/citus-cluster/values.yaml
-          helm lint ./helm/citus-cluster --values ./helm/citus-cluster/values.stg.yaml
+          helm lint ./helm/citus-cluster --values ./helm/citus-cluster/values.example-monitoring-production.yaml
 
       - name: Template Helm chart (default values)
         run: |
