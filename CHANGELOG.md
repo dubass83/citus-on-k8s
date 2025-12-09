@@ -1,3 +1,10 @@
+## [1.0.1](https://github.com/dubass83/citus-on-k8s/compare/v1.0.0...v1.0.1) (2025-12-09)
+
+
+### Bug Fixes
+
+* only build linux/amd64 version ([9dd1efe](https://github.com/dubass83/citus-on-k8s/commit/9dd1efed589494b9e2d63fe47e37f685eaf34dfd))
+
 # 1.0.0 (2025-12-09)
 
 
