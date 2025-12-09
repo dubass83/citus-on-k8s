@@ -38,7 +38,7 @@
           {
             "type": "release",
             "release": "major"
-          },
+          }
         ],
         "parserOpts": {
           "noteKeywords": [
@@ -78,13 +78,9 @@
       }
     ],
     [
-      "@semantic-release/gitlab",
-      {
-        "assets": [
-          "CHANGELOG.md"
-        ]
-      }
-    ],[
+      "@semantic-release/github"
+    ],
+    [
       "@semantic-release/exec",
       {
         "verifyReleaseCmd": "echo ${nextRelease.version} > VERSION.txt"
