@@ -1,3 +1,15 @@
+# [1.1.0](https://github.com/dubass83/citus-on-k8s/compare/v1.0.1...v1.1.0) (2025-12-11)
+
+
+### Features
+
+* **helm:** add configurable /dev/shm volume for distributed operations ([4d53932](https://github.com/dubass83/citus-on-k8s/commit/4d539321b41fd1db06287b27e18f15a8aec0cd76))
+
+
+### BREAKING CHANGES
+
+* **helm:** ** None (enabled by default with sensible defaults)
+
 ## [1.0.1](https://github.com/dubass83/citus-on-k8s/compare/v1.0.0...v1.0.1) (2025-12-09)
 
 
