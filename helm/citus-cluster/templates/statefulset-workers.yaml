@@ -78,6 +78,10 @@ spec:
               name: ssl-certs-writable
               readOnly: true
           {{- end }}
+          {{- if $.Values.podSpec.shmVolume.enabled }}
+            - name: dshm
+              mountPath: /dev/shm
+          {{- end }}
           env:
             - name: PATRONI_KUBERNETES_POD_IP
               valueFrom:
@@ -218,6 +222,14 @@ spec:
             secretName: {{ $.Values.ssl.secretName }}
         - name: ssl-certs-writable  # EmptyDir for writable copies
           emptyDir: {}
+      {{- end }}
+      {{- if $.Values.podSpec.shmVolume.enabled }}
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            {{- if $.Values.podSpec.shmVolume.sizeLimit }}
+            sizeLimit: {{ $.Values.podSpec.shmVolume.sizeLimit }}
+            {{- end }}
       {{- end }}
       {{- if and $.Values.monitoring.enabled $.Values.monitoring.postgresExporter.enabled $.Values.monitoring.postgresExporter.customQueries.enabled }}
         - name: exporter-queries

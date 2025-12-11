@@ -157,6 +157,15 @@ storage:
 # Pod configuration
 podSpec:
   terminationGracePeriodSeconds: 0
+  # Shared memory volume configuration
+  # PostgreSQL uses /dev/shm for POSIX shared memory operations
+  # Distributed operations (e.g., distributed DDL) may require more than the default 64Mi
+  shmVolume:
+    # Enable mounting custom /dev/shm emptyDir volume
+    enabled: true
+    # Size limit for shared memory (default: 2Gi)
+    # Increase if you see "No space left on device" errors during distributed operations
+    sizeLimit: 2Gi
 
 # Init container configuration for fixing permissions
 initContainer:

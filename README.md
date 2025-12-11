@@ -326,6 +326,12 @@ storage:
     enabled: true
     size: 5Gi
 
+# Shared Memory (/dev/shm)
+podSpec:
+  shmVolume:
+    enabled: true      # Enable custom /dev/shm volume (default: true)
+    sizeLimit: 2Gi     # Size limit (default: 2Gi)
+
 # SSL/TLS
 ssl:
   enabled: true
@@ -340,6 +346,41 @@ additionalExtensions:
     - postgis_topology
     - pg_partman
 ```
+
+### Shared Memory Configuration
+
+PostgreSQL uses `/dev/shm` for POSIX shared memory operations. Distributed operations (especially large DDL operations like `CREATE TABLE ... AS SELECT`) may require more than the default 64Mi provided by Kubernetes.
+
+**Default Configuration:**
+- The cluster enables a custom `/dev/shm` volume by default with 2Gi size limit
+- This resolves "No space left on device" errors during distributed operations
+
+**When to increase shared memory:**
+- Running large distributed DDL operations (CREATE TABLE AS SELECT, CREATE INDEX)
+- Processing large result sets in distributed transactions
+- Executing complex distributed queries across many workers
+- Seeing "No space left on device" errors in PostgreSQL logs
+
+**Deployment Examples:**
+
+```bash
+# Deploy with default 2Gi shared memory
+helm install citusdemo ./helm/citus-cluster
+
+# Deploy with custom shared memory size for large workloads
+helm install citusdemo ./helm/citus-cluster \
+  --set podSpec.shmVolume.sizeLimit=4Gi
+
+# Deploy without custom shared memory (use Kubernetes default 64Mi)
+helm install citusdemo ./helm/citus-cluster \
+  --set podSpec.shmVolume.enabled=false
+```
+
+**Important Notes:**
+- The shared memory volume uses RAM from the worker nodes
+- Ensure your Kubernetes nodes have sufficient memory
+- The `sizeLimit` is per pod, not per cluster
+- Both coordinator and worker pods receive this configuration
 
 ### Environment Variables
 

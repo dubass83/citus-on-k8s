@@ -408,6 +408,35 @@ See [docs/POSTGRESQL_CONFIG_MIGRATION.md](docs/POSTGRESQL_CONFIG_MIGRATION.md) f
 - Default: emptyDir (ephemeral, for development)
 - Production: Set `storage.persistentVolume.enabled: true` in values.yaml
 
+### Shared Memory (/dev/shm)
+PostgreSQL uses `/dev/shm` for POSIX shared memory operations. Distributed operations (e.g., distributed DDL with `CREATE TABLE ... AS SELECT`) may require more than the default 64Mi.
+
+**Configuration** (in values.yaml):
+```yaml
+podSpec:
+  shmVolume:
+    enabled: true      # Enable custom /dev/shm volume (default: true)
+    sizeLimit: 2Gi     # Size limit (default: 2Gi)
+```
+
+**When to increase**:
+- Seeing "No space left on device" errors during distributed queries
+- Running large distributed DDL operations (CREATE TABLE AS SELECT, CREATE INDEX)
+- Processing large result sets in distributed transactions
+
+**Deployment**:
+```bash
+# Deploy with custom shared memory size
+helm install citusdemo ./helm/citus-cluster \
+  --set podSpec.shmVolume.sizeLimit=4Gi
+
+# Disable shared memory volume (use default 64Mi)
+helm install citusdemo ./helm/citus-cluster \
+  --set podSpec.shmVolume.enabled=false
+```
+
+**Note**: The shared memory volume uses RAM from the node, so ensure your worker nodes have sufficient memory.
+
 ### Security
 - Default passwords in values.yaml are for demo only
 - SSL private keys never committed (protected by .gitignore)
